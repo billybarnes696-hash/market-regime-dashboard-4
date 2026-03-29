@@ -1,33 +1,33 @@
-
-from __future__ import annotations
-
 import io
 import json
 import zipfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+from sklearn.cluster import KMeans
+from sklearn.metrics import adjusted_rand_score, silhouette_score
+from sklearn.preprocessing import StandardScaler
 
-# =============================
-# Page setup / styling
-# =============================
-st.set_page_config(page_title="RSP Breadth Sweet Spot Engine", layout="wide", page_icon="📈")
+# -----------------------------
+# App config + styling
+# -----------------------------
+st.set_page_config(page_title="Breadth Sweet Spot Cluster Engine v2", layout="wide", page_icon="📈")
 
-CSS = """
+CUSTOM_CSS = """
 <style>
 :root{
-  --bg:#08111f;
-  --panel:#0e1a31;
-  --panel2:#132445;
-  --text:#ecf2ff;
-  --muted:#94a7d3;
+  --bg:#0b1020;
+  --panel:#111936;
+  --panel-2:#162246;
+  --text:#eaf0ff;
+  --muted:#9cb0df;
   --green:#22c55e;
   --yellow:#f59e0b;
   --red:#ef4444;
@@ -35,121 +35,75 @@ CSS = """
   --purple:#a78bfa;
 }
 .block-container{padding-top:1rem;padding-bottom:2rem;}
-.main-banner{
-  background:linear-gradient(135deg, rgba(56,189,248,.18), rgba(167,139,250,.18));
-  border:1px solid rgba(148,163,184,.25);
-  border-radius:22px;
-  padding:1rem 1.2rem;
-  margin-bottom:1rem;
-  box-shadow:0 16px 40px rgba(0,0,0,.18);
-}
-.soft-card{
-  background:linear-gradient(180deg, rgba(14,26,49,.98), rgba(8,17,31,.99));
-  border:1px solid rgba(148,163,184,.20);
-  border-radius:18px;
-  padding:1rem 1rem .95rem 1rem;
-  box-shadow:0 10px 34px rgba(0,0,0,.20);
-}
-.score-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.9rem;}
-.score-card{min-height:180px;display:flex;flex-direction:column;justify-content:space-between;}
-.score-title{color:#c3d6ff;font-size:1.03rem;font-weight:800;letter-spacing:.02em;}
-.score-value{font-size:3.15rem;line-height:1;font-weight:950;color:#fff;margin:.35rem 0;}
-.score-sub{font-size:1rem;font-weight:800;}
-.score-bar{width:100%;height:13px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;border:1px solid rgba(255,255,255,.08);margin-top:.55rem;}
-.fill{height:100%;border-radius:999px;}
-.fill-green{background:linear-gradient(90deg,#22c55e,#4ade80);}
-.fill-yellow{background:linear-gradient(90deg,#f59e0b,#fbbf24);}
-.fill-red{background:linear-gradient(90deg,#ef4444,#f87171);}
-.fill-blue{background:linear-gradient(90deg,#38bdf8,#60a5fa);}
-.kpi-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.75rem;margin-top:.8rem;}
-.kpi-box{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:.78rem .86rem;}
-.kpi-label{color:#9cb1df;font-size:.88rem;font-weight:700;}
-.kpi-value{color:#fff;font-size:1.85rem;font-weight:900;line-height:1.05;margin-top:.15rem;}
-.pill{display:inline-block;padding:.28rem .6rem;border-radius:999px;font-size:.82rem;font-weight:800;border:1px solid rgba(255,255,255,.12);margin-right:.35rem;margin-bottom:.35rem;}
-.pill-blue{background:rgba(56,189,248,.14);color:#d3efff;}
-.pill-green{background:rgba(34,197,94,.14);color:#ccf8dc;}
-.pill-yellow{background:rgba(245,158,11,.14);color:#fde8b0;}
-.pill-red{background:rgba(239,68,68,.14);color:#ffd0d0;}
-.action-box{border-radius:16px;padding:.86rem 1rem;margin:.55rem 0;border:1px solid rgba(255,255,255,.10);}
-.action-existing{background:rgba(56,189,248,.10);}
-.action-new{background:rgba(245,158,11,.10);}
-.action-add{background:rgba(34,197,94,.10);}
-.section-title{font-size:1.02rem;font-weight:850;color:#dbe8ff;margin-bottom:.45rem;}
-.small-muted{color:#93a4cc;font-size:.9rem;}
-.big-code pre{font-size:1.0rem !important;line-height:1.48 !important;}
+.main-title{padding:1rem 1.2rem;border-radius:18px;background:linear-gradient(135deg, rgba(56,189,248,.16), rgba(167,139,250,.16));border:1px solid rgba(148,163,184,.20);margin-bottom:1rem;}
+.soft-card{background:linear-gradient(180deg, rgba(17,25,54,.96), rgba(10,17,38,.98));border:1px solid rgba(148,163,184,.24);border-radius:18px;padding:1rem;box-shadow:0 10px 35px rgba(0,0,0,.22);}
+.score-card{min-height:160px;display:flex;flex-direction:column;justify-content:space-between;}
+.score-title{color:#bcd0ff;font-size:1.02rem;font-weight:800;letter-spacing:.02em;}
+.score-value{font-size:3rem;line-height:1.0;font-weight:950;color:#fff;margin:.3rem 0;letter-spacing:-.03em;}
+.score-subtitle{font-size:.98rem;font-weight:700;color:#cfe0ff;}
+.score-bar{width:100%;height:12px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden;border:1px solid rgba(255,255,255,.08);margin-top:.65rem;}
+.score-fill{height:100%;border-radius:999px;}
+.score-fill-green{background:linear-gradient(90deg,#22c55e,#4ade80);} 
+.score-fill-yellow{background:linear-gradient(90deg,#f59e0b,#fbbf24);} 
+.score-fill-red{background:linear-gradient(90deg,#ef4444,#f87171);} 
+.score-fill-blue{background:linear-gradient(90deg,#38bdf8,#60a5fa);} 
+.kpi-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.75rem;margin-top:.85rem;}
+.kpi-box{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:.8rem .85rem;}
+.kpi-label{color:#9fb2de;font-size:.9rem;font-weight:700;}
+.kpi-value{color:#fff;font-size:1.75rem;font-weight:900;line-height:1.05;margin-top:.15rem;}
+.action-box{border-radius:16px;padding:.85rem 1rem;margin:.5rem 0;border:1px solid rgba(255,255,255,.10);}
+.action-existing{background:rgba(56,189,248,.10);} 
+.action-new{background:rgba(245,158,11,.10);} 
+.action-add{background:rgba(34,197,94,.10);} 
+.pill{display:inline-block;padding:.3rem .6rem;border-radius:999px;font-size:.82rem;font-weight:700;border:1px solid rgba(255,255,255,.12);margin-right:.35rem;}
+.pill-green{background:rgba(34,197,94,.16);color:#bbf7d0;} 
+.pill-yellow{background:rgba(245,158,11,.16);color:#fde68a;} 
+.pill-red{background:rgba(239,68,68,.16);color:#fecaca;} 
+.pill-blue{background:rgba(56,189,248,.16);color:#bae6fd;} 
+.pill-purple{background:rgba(167,139,250,.16);color:#ddd6fe;} 
+.small-muted{color:#93a4cc;font-size:.88rem;}
 </style>
 """
 
-st.markdown(CSS, unsafe_allow_html=True)
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown(
     """
-    <div class="main-banner">
-      <div style="font-size:1.55rem;font-weight:950;">📈 RSP Breadth Sweet Spot Engine</div>
-      <div class="small-muted">Empirical bounce / repair / regime model built from your historical StockCharts breadth data, with realtime snapshot updates and a canary-filter backtest.</div>
+    <div class="main-title">
+      <div style="font-size:1.55rem;font-weight:900;">📈 Breadth Sweet Spot Cluster Engine v2</div>
+      <div class="small-muted">Empirical sweet spots + clustering + canary overlay + walk-forward validation.</div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# =============================
-# Persistence
-# =============================
-APP_DIR = Path("breadth_sweetspot_store")
+# -----------------------------
+# Constants / storage
+# -----------------------------
+APP_DIR = Path("breadth_cluster_store_v2")
 APP_DIR.mkdir(exist_ok=True)
-DAILY_PATH = APP_DIR / "daily_hist.parquet"
-WEEKLY_PATH = APP_DIR / "weekly_hist.parquet"
-MODEL_PATH = APP_DIR / "sweetspot_model.json"
+HIST_DAILY_PATH = APP_DIR / "daily_history.parquet"
+HIST_WEEKLY_PATH = APP_DIR / "weekly_history.parquet"
+MODEL_META_PATH = APP_DIR / "model_meta.json"
+SWEET_SPOT_PATH = APP_DIR / "sweet_spots.json"
+CLUSTER_INFO_PATH = APP_DIR / "cluster_info.json"
 UPLOAD_HISTORY_PATH = APP_DIR / "upload_history.csv"
 SNAPSHOT_DIR = APP_DIR / "snapshots"
 SNAPSHOT_DIR.mkdir(exist_ok=True)
 
-
-# =============================
-# Constants / symbol mapping
-# =============================
-PRIMARY_FEATURES = [
-    "$BPSPX_bb20",
-    "$BPNYA_close",
-    "$OEXA200R_close",
-    "$SPXA50R_close",
-    "$NYMO_close",
-    "$NYSI_close",
-    "$CPCE_close",
-    "$NYHL_close",
+FEATURES = [
+    "$BPSPX", "$BPSPX_%B", "$BPNYA", "$OEXA200R", "$SPXA50R", "$NYMO", "$NYSI", "$CPCE",
+    "$NYHL", "$NYAD", "$SPXADP", "RSP:SPY"
 ]
+KEY_FEATURES_FOR_SCORING = ["$BPSPX_%B", "$BPNYA", "$OEXA200R", "$SPXA50R", "$NYMO", "$NYSI", "$CPCE", "$NYHL", "RSP:SPY"]
+WEEKLY_FEATURES = ["$BPSPX", "$SPXA50R", "$NYSI", "$OEXA200R", "RSP"]
+CANARY_FEATURES = ["RSP:SPY", "SMH:SPY", "IWM:SPY", "XLF:SPY", "XLY:SPY", "HYG:SHY", "SPXS:SVOL", "SPY:VXX"]
+OUTCOME_WINDOWS = {"bounce": 10, "repair": 20, "regime": 60}
+MIN_FEATURE_OBS = 40
+EASTERN = "America/New_York"
 
-WEEKLY_FEATURES = [
-    "$BPSPX_bb20",
-    "$SPXA50R_close",
-    "$NYSI_close",
-    "$NYHL_close",
-    "RSP_close",
-    "RSP:SPY_close",
-]
-
-CHART_SYMBOLS = ["$BPSPX", "$BPNYA", "$SPXA50R", "$OEXA200R", "$NYMO", "$NYSI", "$CPCE", "$NYHL", "RSP", "RSP:SPY"]
-MOMENTUM_SYMBOLS = ["$BPSPX_%B", "$BPNYA", "$SPXA50R", "$OEXA200R", "$NYMO", "$NYSI", "$CPCE", "$NYHL", "$NYAD", "$SPXADP", "RSP:SPY"]
-CANARY_WEIGHTS = {
-    "SPXS:SVOL": 0.24,
-    "HYG:IEF": 0.20,
-    "SMH:SPY": 0.18,
-    "XLF:SPY": 0.12,
-    "RSP:SPY": 0.12,
-    "IWM:SPY": 0.10,
-    "VXX": 0.04,   # inverted later
-}
-
-OUTCOME_DEFS = {
-    "Bounce": {"horizon": 10, "ret": 0.03, "dd": -0.03, "type": "max"},
-    "Repair": {"horizon": 20, "ret": 0.04, "dd": -0.05, "type": "end"},
-    "Regime": {"horizon": 60, "ret": 0.08, "dd": -0.08, "type": "end"},
-}
-WEEKLY_REGIME_DEF = {"horizon": 12, "ret": 0.08, "dd": -0.08, "type": "end"}
-
-
-# =============================
-# Utilities
-# =============================
+# -----------------------------
+# Helpers
+# -----------------------------
 def safe_float(x) -> float:
     try:
         return float(x)
@@ -157,10 +111,14 @@ def safe_float(x) -> float:
         return np.nan
 
 
-def fmt_num(x, digits=2) -> str:
-    if pd.isna(x):
+def fmt_num(v, d=2):
+    if pd.isna(v):
         return "n/a"
-    return f"{float(x):.{digits}f}"
+    return f"{float(v):.{d}f}"
+
+
+def save_json(path: Path, data):
+    path.write_text(json.dumps(data, indent=2))
 
 
 def load_json(path: Path, default):
@@ -172,52 +130,59 @@ def load_json(path: Path, default):
         return default
 
 
-def save_json(path: Path, data):
-    path.write_text(json.dumps(data, indent=2))
+def metric_color(score, max_score):
+    ratio = 0 if max_score == 0 or pd.isna(score) else score / max_score
+    if ratio >= 0.7:
+        return "green"
+    if ratio >= 0.5:
+        return "yellow"
+    if ratio >= 0.3:
+        return "blue"
+    return "red"
 
 
-def normalize_symbol_from_filename(name: str) -> Tuple[str, str]:
-    stem = Path(name).stem
-    timeframe = "weekly" if stem.endswith(" w") else "daily"
-    stem = stem.replace(" w", "")
-    if stem.startswith("_"):
-        base = stem[1:]
-        return f"${base.upper()}", timeframe
-    if "_" in stem:
-        parts = [p.upper() for p in stem.split("_")]
-        return ":".join(parts), timeframe
-    return stem.upper(), timeframe
+def score_card(title: str, value: float, max_score: float, subtitle: str = ""):
+    color = metric_color(value, max_score)
+    pct = 0 if pd.isna(value) or max_score == 0 else max(0, min(100, 100 * value / max_score))
+    st.markdown(
+        f"""
+        <div class="soft-card score-card">
+          <div>
+            <div class="score-title">{title}</div>
+            <div class="score-value">{0 if pd.isna(value) else value:.0f}</div>
+            <div class="score-subtitle">{subtitle}</div>
+          </div>
+          <div class="score-bar"><div class="score-fill score-fill-{color}" style="width:{pct:.0f}%"></div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def now_eastern() -> pd.Timestamp:
-    return pd.Timestamp.now(tz="America/New_York")
-
-
-def market_phase(ts: pd.Timestamp | None = None) -> str:
-    ts = ts or now_eastern()
-    t = ts.hour + ts.minute / 60
-    if t < 11:
+def market_phase(ts: Optional[pd.Timestamp] = None) -> str:
+    now = pd.Timestamp.now(tz=EASTERN) if ts is None else pd.Timestamp(ts)
+    if now.tzinfo is None:
+        now = now.tz_localize(EASTERN)
+    hhmm = now.hour + now.minute / 60
+    if hhmm < 11:
         return "Morning"
-    if t < 14:
+    if hhmm < 14:
         return "Midday"
-    if t < 16:
+    if hhmm < 16:
         return "Power Hour"
-    return "Post Close"
+    if hhmm < 18:
+        return "Post Close"
+    return "Official EOD"
 
 
-def official_mode(ts: pd.Timestamp | None = None) -> bool:
-    ts = ts or now_eastern()
-    return ts.hour >= 18
+def warning_box(messages: List[str], title: str = "Warnings"):
+    if messages:
+        st.warning(f"**{title}:**\n\n- " + "\n- ".join(messages))
 
 
-def score_color(score: float) -> Tuple[str, str]:
-    if score >= 70:
-        return "#22c55e", "fill-green"
-    if score >= 45:
-        return "#f59e0b", "fill-yellow"
-    return "#ef4444", "fill-red"
-
-
+# -----------------------------
+# Indicators
+# -----------------------------
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
@@ -229,7 +194,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     ma_up = up.ewm(alpha=1 / period, adjust=False).mean()
     ma_down = down.ewm(alpha=1 / period, adjust=False).mean()
     rs = ma_up / ma_down.replace(0, np.nan)
-    return (100 - 100 / (1 + rs)).fillna(50)
+    return (100 - (100 / (1 + rs))).fillna(50)
 
 
 def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
@@ -251,1042 +216,954 @@ def roc(series: pd.Series, period: int = 3) -> pd.Series:
     return 100 * (series / series.shift(period) - 1)
 
 
-def tsi(series: pd.Series, long: int = 25, short: int = 13, signal: int = 7) -> Tuple[pd.Series, pd.Series]:
+def tsi(series: pd.Series, long_: int = 25, short_: int = 13, signal: int = 7):
     m = series.diff()
     a = m.abs()
-    m1 = ema(ema(m, long), short)
-    a1 = ema(ema(a, long), short)
-    t = 100 * (m1 / a1.replace(0, np.nan))
-    sig = ema(t, signal)
-    return t, sig
+    m1 = ema(ema(m, long_), short_)
+    a1 = ema(ema(a, long_), short_)
+    tsi_val = 100 * (m1 / a1.replace(0, np.nan))
+    sig = ema(tsi_val, signal)
+    return tsi_val, sig
 
 
-def macd_hist(series: pd.Series, fast: int = 24, slow: int = 52, signal: int = 18) -> pd.Series:
-    line = ema(series, fast) - ema(series, slow)
-    sig = ema(line, signal)
-    return line - sig
-
-
-def stoch_from_close(close: pd.Series, length: int = 14, smoothk: int = 3) -> pd.Series:
-    lo = close.rolling(length).min()
-    hi = close.rolling(length).max()
-    denom = (hi - lo).replace(0, np.nan)
-    k = 100 * (close - lo) / denom
-    return k.rolling(smoothk).mean()
-
-
-def slope_n(series: pd.Series, n: int = 3) -> pd.Series:
-    return series - series.shift(n)
-
-
-# =============================
-# Parsing / feature building
-# =============================
-@st.cache_data(show_spinner=False)
-def parse_stockcharts_zip(file_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    daily_records = []
-    weekly_records = []
-    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-        names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        if not names:
-            raise ValueError("No CSV files were found inside the zip.")
-        for name in names:
-            symbol, timeframe = normalize_symbol_from_filename(name)
-            raw = zf.read(name)
-            df = pd.read_csv(io.BytesIO(raw), skiprows=1)
-            df.columns = [str(c).strip() for c in df.columns]
-            rename = {c: c.strip().title() for c in df.columns}
-            df = df.rename(columns=rename)
-            needed = {"Date", "Open", "High", "Low", "Close"}
-            if not needed.issubset(set(df.columns)):
-                continue
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-            for c in ["Open", "High", "Low", "Close", "Volume"]:
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-            df = df.dropna(subset=["Date", "Close"]).copy()
-            df["symbol"] = symbol
-            df["timeframe"] = timeframe
-            keep = ["Date", "symbol", "Open", "High", "Low", "Close", "Volume", "timeframe"]
-            df = df[[c for c in keep if c in df.columns]].rename(columns={"Date": "date", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
-            if "volume" not in df.columns:
-                df["volume"] = np.nan
-            if timeframe == "weekly":
-                weekly_records.append(df)
-            else:
-                daily_records.append(df)
-    if not daily_records:
-        raise ValueError("Could not parse daily history from the zip.")
-    daily = pd.concat(daily_records, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
-    weekly = pd.concat(weekly_records, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True) if weekly_records else pd.DataFrame(columns=daily.columns)
-    return daily, weekly
-
-
-@st.cache_data(show_spinner=False)
-def add_features(hist: pd.DataFrame) -> pd.DataFrame:
-    if hist.empty:
-        return hist.copy()
+def add_indicator_features(hist: pd.DataFrame) -> pd.DataFrame:
     frames = []
     for sym, g in hist.groupby("symbol", sort=False):
         g = g.sort_values("date").copy()
         g["rsi14"] = rsi(g["close"], 14)
         g["cci20"] = cci(g["high"], g["low"], g["close"], 20)
-        g["bb20"] = percent_b(g["close"], 20, 2.0)
+        g["pct_b20"] = percent_b(g["close"], 20, 2.0)
         g["roc3"] = roc(g["close"], 3)
-        g["slope3"] = slope_n(g["close"], 3)
-        g["tsi4"], g["tsi4_sig"] = tsi(g["close"], 4, 2, 4)
+        g["slope3"] = g["close"] - g["close"].shift(3)
+        g["tsi_fast"], g["tsi_fast_sig"] = tsi(g["close"], 4, 2, 4)
         g["ma20"] = g["close"].rolling(20).mean()
         g["ma50"] = g["close"].rolling(50).mean()
         frames.append(g)
-    return pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-
-def pivot_feature_frame(hist_feat: pd.DataFrame, features: List[str]) -> pd.DataFrame:
-    idx = None
-    frame = pd.DataFrame()
-    for sym, g in hist_feat.groupby("symbol", sort=False):
-        s = g.sort_values("date").set_index("date")
-        if idx is None:
-            idx = s.index
-        else:
-            idx = idx.union(s.index)
-    if idx is None:
-        return pd.DataFrame()
-    frame = pd.DataFrame(index=sorted(idx))
-    for sym, g in hist_feat.groupby("symbol", sort=False):
-        s = g.sort_values("date").set_index("date")
-        if f"{sym}_close" in features:
-            frame[f"{sym}_close"] = s["close"].reindex(frame.index)
-        if f"{sym}_bb20" in features:
-            frame[f"{sym}_bb20"] = s["bb20"].reindex(frame.index)
-        if f"{sym}_rsi14" in features:
-            frame[f"{sym}_rsi14"] = s["rsi14"].reindex(frame.index)
-        if f"{sym}_roc3" in features:
-            frame[f"{sym}_roc3"] = s["roc3"].reindex(frame.index)
-    return frame.sort_index()
-
-
-def compute_future_metrics(price: pd.Series, horizon: int) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    fwd_end = price.shift(-horizon) / price - 1
-    max_gain = pd.Series(index=price.index, dtype=float)
-    max_dd = pd.Series(index=price.index, dtype=float)
-    vals = price.to_numpy(dtype=float)
-    for i in range(len(vals)):
-        if i + horizon >= len(vals):
-            max_gain.iloc[i] = np.nan
-            max_dd.iloc[i] = np.nan
-            continue
-        window = vals[i + 1 : i + horizon + 1]
-        if len(window) == 0 or np.isnan(vals[i]):
-            max_gain.iloc[i] = np.nan
-            max_dd.iloc[i] = np.nan
-            continue
-        max_gain.iloc[i] = np.nanmax(window / vals[i] - 1)
-        max_dd.iloc[i] = np.nanmin(window / vals[i] - 1)
-    return fwd_end, max_gain, max_dd
-
-
-def build_outcome_flags(rsp_price: pd.Series) -> pd.DataFrame:
-    out = pd.DataFrame(index=rsp_price.index)
-    for name, cfg in OUTCOME_DEFS.items():
-        fwd_end, max_gain, max_dd = compute_future_metrics(rsp_price, cfg["horizon"])
-        if cfg["type"] == "max":
-            success = (max_gain >= cfg["ret"]) & (max_dd >= cfg["dd"])
-        else:
-            success = (fwd_end >= cfg["ret"]) & (max_dd >= cfg["dd"])
-        out[f"{name}_success"] = success
-        out[f"{name}_fwd_end"] = fwd_end
-        out[f"{name}_max_gain"] = max_gain
-        out[f"{name}_max_dd"] = max_dd
-    return out
-
-
-def build_weekly_regime_flags(rsp_weekly: pd.Series) -> pd.DataFrame:
-    fwd_end, _, max_dd = compute_future_metrics(rsp_weekly, WEEKLY_REGIME_DEF["horizon"])
-    success = (fwd_end >= WEEKLY_REGIME_DEF["ret"]) & (max_dd >= WEEKLY_REGIME_DEF["dd"])
-    return pd.DataFrame({"WeeklyRegime_success": success, "WeeklyRegime_fwd_end": fwd_end, "WeeklyRegime_max_dd": max_dd}, index=rsp_weekly.index)
-
-
-def band_distance_score(x: float, q25: float, med: float, q75: float) -> float:
-    if pd.isna(x) or pd.isna(q25) or pd.isna(med) or pd.isna(q75):
-        return np.nan
-    iqr = max(abs(q75 - q25), 1e-6)
-    if q25 <= x <= q75:
-        d = abs(x - med) / iqr
-        return max(0.72, 1.0 - 0.28 * d)
-    d = min(abs(x - med) / iqr, 3.0)
-    return max(0.0, 0.72 - 0.24 * (d - 1.0))
-
-
-def build_combo_table(df: pd.DataFrame, outcome_col: str, summaries: pd.DataFrame, max_features: int = 4, min_support: int = 150) -> pd.DataFrame:
-    available = [r["Feature"] for _, r in summaries.iterrows() if r["Feature"] in df.columns]
+# -----------------------------
+# Parsing
+# -----------------------------
+def parse_stockcharts_csv(content: bytes) -> pd.DataFrame:
+    text = content.decode("utf-8", errors="ignore")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     rows = []
-    base_hit = float(df[outcome_col].mean()) if len(df) else np.nan
-    for k in [2, 3, 4]:
-        if len(available) < k:
+    for ln in lines:
+        if ln.lower().startswith(("date,", "symbol,", "ticker,")):
             continue
-        from itertools import combinations
-        for combo in combinations(available, k):
-            mask = pd.Series(True, index=df.index)
-            pieces = []
-            for feat in combo:
-                row = summaries.loc[summaries["Feature"] == feat].iloc[0]
-                q25, q75 = row["Q25"], row["Q75"]
-                mask &= df[feat].between(q25, q75, inclusive="both")
-                pieces.append(f"{feat} [{q25:.3f},{q75:.3f}]")
-            support = int(mask.sum())
-            if support < min_support:
-                continue
-            hit = float(df.loc[mask, outcome_col].mean())
-            if np.isnan(hit) or np.isnan(base_hit) or base_hit <= 0:
-                continue
-            rows.append({
-                "Outcome": outcome_col.replace("_success", ""),
-                "Combo": " AND ".join(pieces),
-                "Support": support,
-                "Hit Rate": hit,
-                "Base Hit Rate": base_hit,
-                "Lift": hit / base_hit,
-                "Features": list(combo),
-            })
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
-    return out.sort_values(["Lift", "Hit Rate", "Support"], ascending=[False, False, False]).head(8).reset_index(drop=True)
+        parts = [p.strip() for p in ln.split(",")]
+        if len(parts) < 6:
+            continue
+        dt = pd.to_datetime(parts[0], errors="coerce")
+        if pd.isna(dt):
+            continue
+        nums = [safe_float(x) for x in parts[1:6]]
+        if all(pd.isna(x) for x in nums[:4]):
+            continue
+        rows.append({"date": dt, "open": nums[0], "high": nums[1], "low": nums[2], "close": nums[3], "volume": nums[4]})
+    if not rows:
+        raise ValueError("No rows parsed from StockCharts CSV")
+    return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
 
 
-def build_sweetspot_model(daily_feat: pd.DataFrame, weekly_feat: pd.DataFrame) -> Dict:
-    daily_pivot = pivot_feature_frame(daily_feat, list(set(PRIMARY_FEATURES + ["RSP_close", "RSP:SPY_close"])))
-    if "RSP_close" not in daily_pivot.columns:
-        raise ValueError("RSP daily history is required for sweet-spot modeling.")
-    rsp = daily_pivot["RSP_close"].dropna()
-    outcomes = build_outcome_flags(rsp)
-    base = daily_pivot.join(outcomes, how="inner").dropna(subset=["RSP_close"])
-
-    summary_rows = []
-    combo_frames = []
-    for outcome in ["Bounce", "Repair", "Regime"]:
-        outcome_col = f"{outcome}_success"
-        success = base[base[outcome_col].fillna(False)].copy()
-        for feat in PRIMARY_FEATURES:
-            if feat not in base.columns:
-                continue
-            s = success[feat].dropna()
-            u = base[feat].dropna()
-            if len(s) < 50 or len(u) < 200:
-                continue
-            summary_rows.append({
-                "Outcome": outcome,
-                "Feature": feat,
-                "Median": float(s.median()),
-                "Q25": float(s.quantile(0.25)),
-                "Q75": float(s.quantile(0.75)),
-                "Universe Median": float(u.median()),
-                "Hit Rate in Universe": float(base[outcome_col].mean()),
-                "Universe Count": int(len(u)),
-                "Success Count": int(len(s)),
-            })
-        sub = pd.DataFrame([r for r in summary_rows if r["Outcome"] == outcome])
-        if not sub.empty:
-            combo_frames.append(build_combo_table(base, outcome_col, sub))
-
-    weekly_model = {}
-    if not weekly_feat.empty:
-        weekly_pivot = pivot_feature_frame(weekly_feat, list(set(WEEKLY_FEATURES + ["RSP_close"])))
-        if "RSP_close" in weekly_pivot.columns:
-            flags = build_weekly_regime_flags(weekly_pivot["RSP_close"].dropna())
-            wb = weekly_pivot.join(flags, how="inner")
-            rows = []
-            success = wb[wb["WeeklyRegime_success"].fillna(False)]
-            for feat in WEEKLY_FEATURES:
-                if feat not in wb.columns:
-                    continue
-                s = success[feat].dropna()
-                u = wb[feat].dropna()
-                if len(s) < 20 or len(u) < 60:
-                    continue
-                rows.append({
-                    "Outcome": "WeeklyRegime",
-                    "Feature": feat,
-                    "Median": float(s.median()),
-                    "Q25": float(s.quantile(0.25)),
-                    "Q75": float(s.quantile(0.75)),
-                    "Universe Median": float(u.median()),
-                    "Hit Rate in Universe": float(wb["WeeklyRegime_success"].mean()),
-                    "Universe Count": int(len(u)),
-                    "Success Count": int(len(s)),
-                })
-            weekly_model = {"summary": rows}
-
-    summary_df = pd.DataFrame(summary_rows)
-    combos_df = pd.concat(combo_frames, ignore_index=True) if combo_frames else pd.DataFrame(columns=["Outcome", "Combo", "Support", "Hit Rate", "Base Hit Rate", "Lift", "Features"])
-
-    return {
-        "summary": summary_df.to_dict(orient="records"),
-        "combos": combos_df.to_dict(orient="records"),
-        "weekly": weekly_model,
-        "features": PRIMARY_FEATURES,
-        "built_at": datetime.utcnow().isoformat(),
+def symbol_from_filename(name: str) -> Tuple[str, str]:
+    stem = Path(name).stem.strip().lower()
+    timeframe = "weekly" if stem.endswith(" w") or stem.endswith("_w") else "daily"
+    stem = stem.replace(" w", "").replace("_w", "")
+    mapping = {
+        "rsp": "RSP", "ursp": "URSP", "spy": "SPY", "vxx": "VXX",
+        "_bpspx": "$BPSPX", "bpspx": "$BPSPX",
+        "_bpnya": "$BPNYA", "bpnya": "$BPNYA",
+        "_oexa200r": "$OEXA200R", "oexa200r": "$OEXA200R",
+        "_spxa50r": "$SPXA50R", "spxa50r": "$SPXA50R",
+        "_nymo": "$NYMO", "nymo": "$NYMO",
+        "_nysi": "$NYSI", "nysi": "$NYSI",
+        "_cpce": "$CPCE", "cpce": "$CPCE",
+        "_nyhl": "$NYHL", "nyhl": "$NYHL",
+        "_nyad": "$NYAD", "nyad": "$NYAD",
+        "_spxadp": "$SPXADP", "spxadp": "$SPXADP",
+        "_hyg_ief": "HYG:IEF", "hyg_ief": "HYG:IEF",
+        "_hyg_shy": "HYG:SHY", "hyg_shy": "HYG:SHY",
+        "_rsp_spy": "RSP:SPY", "rsp_spy": "RSP:SPY",
+        "_smh_spy": "SMH:SPY", "smh_spy": "SMH:SPY",
+        "_iwm_spy": "IWM:SPY", "iwm_spy": "IWM:SPY",
+        "_xlf_spy": "XLF:SPY", "xlf_spy": "XLF:SPY",
+        "_xly_spy": "XLY:SPY", "xly_spy": "XLY:SPY",
+        "_spxs_svol": "SPXS:SVOL", "spxs_svol": "SPXS:SVOL",
+        "_spy_vxx": "SPY:VXX", "spy_vxx": "SPY:VXX",
     }
+    return mapping.get(stem, stem.upper()), timeframe
 
 
-def save_snapshot_file(df: pd.DataFrame) -> str:
-    path = SNAPSHOT_DIR / f"snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    df.to_csv(path, index=False)
-    return str(path)
-
-
-def load_upload_history() -> pd.DataFrame:
-    if not UPLOAD_HISTORY_PATH.exists():
-        return pd.DataFrame()
+def parse_stockcharts_zip(file_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
+    daily, weekly, issues = [], [], []
     try:
-        return pd.read_csv(UPLOAD_HISTORY_PATH)
-    except Exception:
-        return pd.DataFrame()
+        zf = zipfile.ZipFile(io.BytesIO(file_bytes))
+    except Exception as e:
+        raise ValueError(f"Zip file could not be opened: {e}")
+    with zf:
+        for name in zf.namelist():
+            if name.endswith("/") or not name.lower().endswith(".csv"):
+                continue
+            try:
+                content = zf.read(name)
+                df = parse_stockcharts_csv(content)
+                sym, tf = symbol_from_filename(name)
+                df["symbol"] = sym
+                (weekly if tf == "weekly" else daily).append(df)
+            except Exception as e:
+                issues.append(f"Skipped {name}: {e}")
+    if not daily:
+        raise ValueError("No daily CSVs were parsed from the zip file.")
+    daily_df = pd.concat(daily, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
+    weekly_df = pd.concat(weekly, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True) if weekly else pd.DataFrame()
+    return daily_df, weekly_df, issues
 
 
-def append_upload_history(row: Dict):
-    hist = load_upload_history()
-    hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
-    hist.to_csv(UPLOAD_HISTORY_PATH, index=False)
-
-
-# =============================
-# Realtime snapshot / current state
-# =============================
-@st.cache_data(show_spinner=False)
 def parse_realtime_snapshot(file_bytes: bytes) -> pd.DataFrame:
     df = pd.read_csv(io.BytesIO(file_bytes))
-    cols = {c.lower().strip(): c for c in df.columns}
-    if "symbol" not in cols:
-        raise ValueError("Realtime snapshot must include a Symbol column.")
-    close_col = None
-    for cand in ["close", "last", "price", "current", "value", "daily close", "close price"]:
-        if cand in cols:
-            close_col = cols[cand]
-            break
+    if "Symbol" not in df.columns:
+        raise ValueError("Realtime snapshot must contain a Symbol column.")
+    close_candidates = ["Close", "Last", "Price", "Current", "Value", "Daily Close", "Close Price"]
+    close_col = next((c for c in close_candidates if c in df.columns), None)
     if close_col is None:
-        raise ValueError("Realtime snapshot must include a close-like column.")
-    out = pd.DataFrame({
-        "Symbol": df[cols["symbol"]].astype(str).str.strip(),
-        "Close": pd.to_numeric(df[close_col], errors="coerce"),
-    })
-    pct_col = None
-    for cand in ["daily pctchange(1,daily close)", "% change", "pct change", "change %", "daily change %"]:
-        if cand in cols:
-            pct_col = cols[cand]
-            break
-    out["PctChange"] = pd.to_numeric(df[pct_col], errors="coerce") if pct_col else np.nan
-    return out.dropna(subset=["Close"])
+        raise ValueError("Realtime snapshot must include a close-like price column.")
+    df = df.copy()
+    df["Symbol"] = df["Symbol"].astype(str).str.strip()
+    df["Close"] = pd.to_numeric(df[close_col], errors="coerce")
+    pct_candidates = ["Daily PctChange(1,Daily Close)", "% Change", "Pct Change", "Change %", "Daily Change %"]
+    pct_col = next((c for c in pct_candidates if c in df.columns), None)
+    df["PctChange"] = pd.to_numeric(df[pct_col], errors="coerce") if pct_col else np.nan
+    return df[["Symbol", "Close", "PctChange"]]
 
-
-def latest_feature_snapshot(hist_feat: pd.DataFrame, prior: bool = False) -> Dict[str, float]:
-    snap = {}
+# -----------------------------
+# Wide feature frame
+# -----------------------------
+def wide_from_hist(hist_feat: pd.DataFrame) -> pd.DataFrame:
     if hist_feat.empty:
-        return snap
-    for sym, g in hist_feat.groupby("symbol", sort=False):
-        g = g.sort_values("date")
-        if prior and len(g) < 2:
-            continue
-        row = g.iloc[-2] if prior else g.iloc[-1]
-        snap[sym] = safe_float(row.get("close"))
-        snap[f"{sym}_%B"] = safe_float(row.get("bb20"))
-        snap[f"{sym}_RSI14"] = safe_float(row.get("rsi14"))
-        snap[f"{sym}_CCI20"] = safe_float(row.get("cci20"))
-        snap[f"{sym}_ROC3"] = safe_float(row.get("roc3"))
-        snap[f"{sym}_SLOPE3"] = safe_float(row.get("slope3"))
-    return snap
+        return pd.DataFrame()
+    value_cols = ["close", "pct_b20", "rsi14", "cci20", "roc3", "slope3", "tsi_fast"]
+    pivoted = []
+    for col in value_cols:
+        p = hist_feat.pivot(index="date", columns="symbol", values=col)
+        if col == "close":
+            p.columns = [str(c) for c in p.columns]
+        elif col == "pct_b20":
+            p.columns = [f"{c}_%B" for c in p.columns]
+        elif col == "rsi14":
+            p.columns = [f"{c}_RSI14" for c in p.columns]
+        elif col == "cci20":
+            p.columns = [f"{c}_CCI20" for c in p.columns]
+        elif col == "roc3":
+            p.columns = [f"{c}_ROC3" for c in p.columns]
+        elif col == "slope3":
+            p.columns = [f"{c}_SLOPE3" for c in p.columns]
+        elif col == "tsi_fast":
+            p.columns = [f"{c}_TSI" for c in p.columns]
+        pivoted.append(p)
+    wide = pd.concat(pivoted, axis=1).sort_index()
+    return wide
 
 
-def recompute_with_realtime(hist_feat: pd.DataFrame, realtime_df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
-    out = {}
-    for _, row in realtime_df.iterrows():
-        sym = str(row["Symbol"]).strip()
-        new_close = safe_float(row["Close"])
-        g = hist_feat[hist_feat["symbol"] == sym].sort_values("date").copy()
-        if g.empty or pd.isna(new_close):
-            continue
-        g.iloc[-1, g.columns.get_loc("close")] = new_close
-        g.iloc[-1, g.columns.get_loc("high")] = max(safe_float(g.iloc[-1]["high"]), new_close)
-        g.iloc[-1, g.columns.get_loc("low")] = min(safe_float(g.iloc[-1]["low"]), new_close)
-        if len(g) > 1:
-            g.iloc[-1, g.columns.get_loc("open")] = safe_float(g.iloc[-2]["close"])
-        g = add_features(g)
-        last = g.iloc[-1]
-        out[sym] = {
-            "close": safe_float(last["close"]),
-            "%B": safe_float(last["bb20"]),
-            "RSI14": safe_float(last["rsi14"]),
-            "CCI20": safe_float(last["cci20"]),
-            "ROC3": safe_float(last["roc3"]),
-            "SLOPE3": safe_float(last["slope3"]),
-        }
+def current_snapshot_from_hist(hist_feat: pd.DataFrame, realtime_df: Optional[pd.DataFrame] = None) -> Tuple[Dict[str, float], Dict[str, float], pd.Timestamp]:
+    wide = wide_from_hist(hist_feat)
+    if wide.empty:
+        return {}, {}, pd.NaT
+    latest_row = wide.iloc[-1].copy()
+    prev_row = wide.iloc[-2].copy() if len(wide) > 1 else latest_row.copy()
+    latest_date = wide.index[-1]
+    if realtime_df is not None and not realtime_df.empty:
+        rt_map = dict(zip(realtime_df["Symbol"], realtime_df["Close"]))
+        for sym, px in rt_map.items():
+            if sym in hist_feat["symbol"].unique():
+                g = hist_feat[hist_feat["symbol"] == sym].sort_values("date").copy()
+                if len(g) >= 20:
+                    g.iloc[-1, g.columns.get_loc("close")] = px
+                    g.iloc[-1, g.columns.get_loc("high")] = max(g.iloc[-1]["high"], px)
+                    g.iloc[-1, g.columns.get_loc("low")] = min(g.iloc[-1]["low"], px)
+                    if len(g) > 1:
+                        g.iloc[-1, g.columns.get_loc("open")] = g.iloc[-2]["close"]
+                    g = add_indicator_features(g)
+                    last = g.sort_values("date").iloc[-1]
+                    latest_row[sym] = safe_float(last["close"])
+                    latest_row[f"{sym}_%B"] = safe_float(last["pct_b20"])
+                    latest_row[f"{sym}_RSI14"] = safe_float(last["rsi14"])
+                    latest_row[f"{sym}_CCI20"] = safe_float(last["cci20"])
+                    latest_row[f"{sym}_ROC3"] = safe_float(last["roc3"])
+                    latest_row[f"{sym}_SLOPE3"] = safe_float(last["slope3"])
+                    latest_row[f"{sym}_TSI"] = safe_float(last["tsi_fast"])
+    return latest_row.to_dict(), prev_row.to_dict(), latest_date
+
+# -----------------------------
+# Outcome definitions + sweet spots
+# -----------------------------
+def forward_metrics(rsp: pd.Series, horizon: int) -> pd.DataFrame:
+    vals = rsp.to_numpy(dtype=float)
+    n = len(vals)
+    if n == 0:
+        return pd.DataFrame(index=rsp.index)
+    future_cols = [np.roll(vals, -(i + 1)) / vals - 1 for i in range(horizon)]
+    arr = np.column_stack(future_cols)
+    if horizon > 0:
+        arr[-horizon:, :] = np.nan
+    out = pd.DataFrame(index=rsp.index)
+    out[f"ret_{horizon}"] = arr[:, horizon - 1]
+    out[f"max_{horizon}"] = np.nanmax(arr, axis=1)
+    out[f"min_{horizon}"] = np.nanmin(arr, axis=1)
+    out.iloc[-horizon:, :] = np.nan
     return out
 
 
-def proxy_nymo(snapshot: Dict[str, float], prev_snapshot: Dict[str, float]) -> Dict[str, float]:
-    nyad = safe_float(snapshot.get("$NYAD"))
-    spxadp = safe_float(snapshot.get("$SPXADP"))
-    prev_nyad = safe_float(prev_snapshot.get("$NYAD"))
-    prev_spxadp = safe_float(prev_snapshot.get("$SPXADP"))
-    if pd.isna(nyad) and pd.isna(spxadp):
-        return {"value": np.nan, "delta": np.nan, "state": "Unavailable"}
+def label_outcomes(wide_daily: pd.DataFrame) -> pd.DataFrame:
+    if "RSP" not in wide_daily.columns:
+        raise ValueError("Historical daily baseline must include RSP for outcome labeling.")
+    rsp = wide_daily["RSP"].dropna().copy()
+    metrics = [forward_metrics(rsp, h) for h in [10, 20, 60]]
+    df = pd.concat([wide_daily, *metrics], axis=1)
+    df["bounce"] = (df["max_10"] >= 0.03) & (df["min_10"] > -0.03)
+    df["repair"] = (df["ret_20"] >= 0.04) & (df["min_20"] > -0.05)
+    df["regime"] = (df["ret_60"] >= 0.08) & (df["ret_20"] >= 0.03) & (df["min_60"] > -0.08)
+    return df
+
+
+def summarize_feature_bands(df: pd.DataFrame, label: str, features: List[str]) -> Dict[str, Dict[str, float]]:
+    hit = df[df[label] == True]
+    result = {}
+    for feat in features:
+        if feat not in hit.columns:
+            continue
+        s = pd.to_numeric(hit[feat], errors="coerce").dropna()
+        if len(s) < 10:
+            continue
+        result[feat] = {
+            "median": float(s.median()),
+            "q25": float(s.quantile(0.25)),
+            "q75": float(s.quantile(0.75)),
+            "mean": float(s.mean()),
+            "std": float(0 if pd.isna(s.std()) else s.std()),
+            "count": int(s.shape[0]),
+        }
+    return result
+
+
+def best_combo_zones(df: pd.DataFrame, label: str, features: List[str]) -> pd.DataFrame:
+    base_rate = float(df[label].mean()) if len(df) else np.nan
+    rows = []
+    usable = [f for f in features if f in df.columns]
+    from itertools import combinations
+    for combo_len in [2, 3]:
+        for combo in combinations(usable, combo_len):
+            mask = pd.Series(True, index=df.index)
+            desc = []
+            for feat in combo:
+                hit_s = pd.to_numeric(df.loc[df[label] == True, feat], errors="coerce").dropna()
+                if len(hit_s) < 10:
+                    mask &= False
+                    continue
+                lo, hi = hit_s.quantile(0.25), hit_s.quantile(0.75)
+                cur = pd.to_numeric(df[feat], errors="coerce")
+                mask &= cur.between(lo, hi, inclusive="both")
+                desc.append(f"{feat}∈[{lo:.3f},{hi:.3f}]")
+            sub = df[mask]
+            if len(sub) < 25:
+                continue
+            hit_rate = float(sub[label].mean())
+            lift = hit_rate / base_rate if base_rate and not pd.isna(base_rate) else np.nan
+            rows.append({"label": label, "combo": " | ".join(combo), "zone": "; ".join(desc), "samples": int(len(sub)), "hit_rate": hit_rate, "base_rate": base_rate, "lift": lift})
+    out = pd.DataFrame(rows)
+    return out.sort_values(["lift", "hit_rate", "samples"], ascending=[False, False, False]).head(20).reset_index(drop=True) if not out.empty else out
+
+# -----------------------------
+# Clustering + validation
+# -----------------------------
+@dataclass
+class ClusterArtifacts:
+    scaler_mean: List[float]
+    scaler_scale: List[float]
+    features: List[str]
+    centroids: List[List[float]]
+    cluster_names: Dict[str, str]
+    cluster_stats: Dict[str, Dict[str, float]]
+    silhouette: Optional[float] = None
+    stability: Optional[float] = None
+
+
+def assign_cluster_names(stats_df: pd.DataFrame) -> Dict[int, str]:
+    names = {}
+    for idx, row in stats_df.iterrows():
+        bounce = row.get("bounce_rate", 0)
+        repair = row.get("repair_rate", 0)
+        regime = row.get("regime_rate", 0)
+        if regime >= max(repair, bounce) and regime > 0.30:
+            names[idx] = "Durable regime"
+        elif repair >= max(regime, bounce) and repair > 0.22:
+            names[idx] = "Repair cluster"
+        elif bounce >= max(regime, repair) and bounce > 0.35:
+            names[idx] = "Bounce cluster"
+        elif row.get("$BPSPX_%B_median", np.nan) < 0.15:
+            names[idx] = "Capitulation / washout"
+        else:
+            names[idx] = "Mixed / transitional"
+    return names
+
+
+def estimate_cluster_stability(X: np.ndarray, n_clusters: int, random_state: int = 42, n_boot: int = 6) -> float:
+    if len(X) < max(100, n_clusters * 10):
+        return np.nan
+    base_labels = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=20).fit_predict(X)
+    scores = []
+    rng = np.random.default_rng(random_state)
+    for i in range(n_boot):
+        sample_idx = np.sort(rng.choice(len(X), size=int(len(X) * 0.8), replace=False))
+        km = KMeans(n_clusters=n_clusters, random_state=random_state + i + 1, n_init=20)
+        labels_sample = km.fit_predict(X[sample_idx])
+        compare = adjusted_rand_score(base_labels[sample_idx], labels_sample)
+        scores.append(compare)
+    return float(np.mean(scores)) if scores else np.nan
+
+
+def build_clusters(outcomes_df: pd.DataFrame, features: List[str], n_clusters: int = 6) -> Tuple[pd.DataFrame, ClusterArtifacts]:
+    feat_df = outcomes_df[features].apply(pd.to_numeric, errors="coerce")
+    valid = feat_df.dropna()
+    if len(valid) < max(MIN_FEATURE_OBS, n_clusters * 10):
+        raise ValueError("Not enough fully populated observations to build stable clusters.")
+    valid_idx = valid.index
+    n_clusters = max(3, min(n_clusters, max(3, len(valid) // 60)))
+    scaler = StandardScaler()
+    X = scaler.fit_transform(valid)
+    km = KMeans(n_clusters=n_clusters, random_state=42, n_init=20)
+    labels = km.fit_predict(X)
+    cluster_stats_rows = []
+    for cl in sorted(np.unique(labels)):
+        sub = valid.loc[labels == cl]
+        metrics = {
+            "cluster": int(cl),
+            "samples": int((labels == cl).sum()),
+            "bounce_rate": float(outcomes_df.loc[sub.index, "bounce"].mean()),
+            "repair_rate": float(outcomes_df.loc[sub.index, "repair"].mean()),
+            "regime_rate": float(outcomes_df.loc[sub.index, "regime"].mean()),
+        }
+        for feat in features:
+            metrics[f"{feat}_median"] = float(sub[feat].median())
+        cluster_stats_rows.append(metrics)
+    stats_df = pd.DataFrame(cluster_stats_rows).sort_values("cluster").reset_index(drop=True)
+    names = assign_cluster_names(stats_df)
+    stats_df["cluster_name"] = stats_df["cluster"].map(names)
+    sil = float(silhouette_score(X, labels)) if len(np.unique(labels)) >= 2 else np.nan
+    stability = estimate_cluster_stability(X, n_clusters)
+    artifacts = ClusterArtifacts(
+        scaler_mean=scaler.mean_.tolist(),
+        scaler_scale=scaler.scale_.tolist(),
+        features=features,
+        centroids=km.cluster_centers_.tolist(),
+        cluster_names={str(k): v for k, v in names.items()},
+        cluster_stats=stats_df.set_index("cluster").to_dict(orient="index"),
+        silhouette=sil,
+        stability=stability,
+    )
+    return stats_df, artifacts
+
+
+def predict_cluster(current: Dict[str, float], artifacts: ClusterArtifacts) -> Tuple[Optional[int], Optional[str], Optional[float]]:
+    vals = []
+    for feat in artifacts.features:
+        v = safe_float(current.get(feat, np.nan))
+        if pd.isna(v):
+            return None, None, None
+        vals.append(v)
+    x = np.array(vals)
+    scale = np.where(np.array(artifacts.scaler_scale) == 0, 1, np.array(artifacts.scaler_scale))
+    scaled = (x - np.array(artifacts.scaler_mean)) / scale
+    cents = np.array(artifacts.centroids)
+    dists = np.sqrt(((cents - scaled) ** 2).sum(axis=1))
+    cl = int(np.argmin(dists))
+    confidence = 1.0 / (1.0 + float(dists[cl]))
+    return cl, artifacts.cluster_names.get(str(cl), f"Cluster {cl}"), confidence
+
+# -----------------------------
+# Sweet spot scoring
+# -----------------------------
+def band_membership_score(value: float, median: float, q25: float, q75: float, std: float = 0.0) -> float:
+    if pd.isna(value) or pd.isna(median) or pd.isna(q25) or pd.isna(q75):
+        return np.nan
+    if q25 <= value <= q75:
+        return 1.0
+    width = max(abs(q75 - q25), std, 1e-6)
+    dist = abs(value - median)
+    return float(max(0.0, min(1.0, 1.0 - (dist / (2.5 * width)))))
+
+
+def score_snapshot_against_bands(snapshot: Dict[str, float], sweet_spots: Dict[str, Dict[str, Dict[str, float]]], weights: Optional[Dict[str, float]] = None) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    weights = weights or {feat: 1.0 for feat in KEY_FEATURES_FOR_SCORING}
+    rows, totals = [], {}
+    for label in ["bounce", "repair", "regime"]:
+        label_bands = sweet_spots.get(label, {})
+        weighted_sum = 0.0
+        weight_total = 0.0
+        for feat, meta in label_bands.items():
+            if feat not in KEY_FEATURES_FOR_SCORING:
+                continue
+            cur = safe_float(snapshot.get(feat, np.nan))
+            sc = band_membership_score(cur, meta["median"], meta["q25"], meta["q75"], meta.get("std", 0.0))
+            w = weights.get(feat, 1.0)
+            if pd.notna(sc):
+                weighted_sum += w * sc
+                weight_total += w
+            rows.append({"Outcome": label.title(), "Feature": feat, "Current": cur, "Median": meta["median"], "Q25": meta["q25"], "Q75": meta["q75"], "Band Score": sc})
+        totals[label] = 100.0 * weighted_sum / weight_total if weight_total else np.nan
+    return pd.DataFrame(rows), totals
+
+
+def weekly_overlay_score(snapshot_weekly: Dict[str, float], weekly_bands: Dict[str, Dict[str, float]]) -> Tuple[pd.DataFrame, float]:
+    rows, vals = [], []
+    for feat, meta in weekly_bands.items():
+        cur = safe_float(snapshot_weekly.get(feat, np.nan))
+        sc = band_membership_score(cur, meta["median"], meta["q25"], meta["q75"], meta.get("std", 0.0))
+        rows.append({"Feature": feat, "Current": cur, "Median": meta["median"], "Q25": meta["q25"], "Q75": meta["q75"], "Score": sc})
+        if pd.notna(sc):
+            vals.append(sc)
+    return pd.DataFrame(rows), (100.0 * float(np.mean(vals)) if vals else np.nan)
+
+# -----------------------------
+# Canary overlay
+# -----------------------------
+def build_canary_overlay_from_history(wide_daily: pd.DataFrame) -> pd.DataFrame:
+    canary_rows = []
+    for feat in CANARY_FEATURES:
+        if feat not in wide_daily.columns:
+            continue
+        px = pd.to_numeric(wide_daily[feat], errors="coerce")
+        if px.notna().sum() < 100:
+            continue
+        ma20 = px.rolling(20).mean()
+        ma50 = px.rolling(50).mean()
+        r = rsi(px, 14)
+        t, _ = tsi(px, 25, 13, 7)
+        score = ((px > ma20).astype(float) + (ma20 > ma50).astype(float) + (r > 50).astype(float) + (t > 0).astype(float)) / 4.0
+        invert = feat == "SPXS:SVOL"
+        if invert:
+            score = 1.0 - score
+        canary_rows.append(score.rename(feat))
+    if not canary_rows:
+        return pd.DataFrame(index=wide_daily.index)
+    df = pd.concat(canary_rows, axis=1)
+    df["canary_score"] = 100.0 * df.mean(axis=1, skipna=True)
+    df["canary_confidence"] = 100.0 * df.notna().mean(axis=1)
+    return df
+
+# -----------------------------
+# Proxy governance + actions
+# -----------------------------
+def compute_proxy_nymo(snapshot: Dict[str, float], prev_snapshot: Dict[str, float]) -> Dict[str, float]:
+    nyad = safe_float(snapshot.get("$NYAD", np.nan))
+    spxadp = safe_float(snapshot.get("$SPXADP", np.nan))
+    prev_nyad = safe_float(prev_snapshot.get("$NYAD", np.nan))
+    prev_spxadp = safe_float(prev_snapshot.get("$SPXADP", np.nan))
     cur_raw = 0.6 * (0 if pd.isna(nyad) else nyad) + 0.4 * (0 if pd.isna(spxadp) else spxadp)
     prev_raw = 0.6 * (0 if pd.isna(prev_nyad) else prev_nyad) + 0.4 * (0 if pd.isna(prev_spxadp) else prev_spxadp)
-    cur = 100 * np.tanh(cur_raw / 1600.0)
-    prev = 100 * np.tanh(prev_raw / 1600.0)
-    delta = cur - prev
-    if cur <= -70:
-        state = "Deep washout"
-    elif cur <= -20:
-        state = "Negative but repairing" if delta > 0 else "Negative and weak"
-    elif cur <= 20:
-        state = "Neutral / crossing"
-    else:
-        state = "Positive thrust"
-    return {"value": cur, "delta": delta, "state": state}
-
-
-@dataclass
-class CurrentState:
-    snapshot: Dict[str, float]
-    prev_snapshot: Dict[str, float]
-    source_mode: str
-    market_phase: str
-
-
-def build_current_state(daily_feat: pd.DataFrame, weekly_feat: pd.DataFrame, realtime_df: pd.DataFrame | None) -> CurrentState:
-    snap = latest_feature_snapshot(daily_feat, prior=False)
-    prev = latest_feature_snapshot(daily_feat, prior=True)
-    if realtime_df is not None and not realtime_df.empty:
-        updates = recompute_with_realtime(daily_feat, realtime_df)
-        for sym, vals in updates.items():
-            snap[sym] = vals["close"]
-            snap[f"{sym}_%B"] = vals["%B"]
-            snap[f"{sym}_RSI14"] = vals["RSI14"]
-            snap[f"{sym}_CCI20"] = vals["CCI20"]
-            snap[f"{sym}_ROC3"] = vals["ROC3"]
-            snap[f"{sym}_SLOPE3"] = vals["SLOPE3"]
-    # weekly latest snapshot into same namespace
-    if not weekly_feat.empty:
-        for sym, g in weekly_feat.groupby("symbol", sort=False):
-            g = g.sort_values("date")
-            row = g.iloc[-1]
-            snap[f"W_{sym}"] = safe_float(row.get("close"))
-            snap[f"W_{sym}_%B"] = safe_float(row.get("bb20"))
-    ts = now_eastern()
-    phase = market_phase(ts)
-    official = official_mode(ts)
-    pnymo = proxy_nymo(snap, prev)
-    if official and pd.notna(snap.get("$NYMO", np.nan)):
-        snap["$NYMO_EFFECTIVE"] = safe_float(snap.get("$NYMO"))
-        snap["$NYMO_EFFECTIVE_DELTA"] = safe_float(snap.get("$NYMO")) - safe_float(prev.get("$NYMO"))
-        mode = "Official breadth mode"
-    else:
-        snap["$NYMO_EFFECTIVE"] = pnymo["value"]
-        snap["$NYMO_EFFECTIVE_DELTA"] = pnymo["delta"]
-        mode = "Intraday proxy mode"
-    snap["$NYMO_PROXY_STATE"] = pnymo["state"]
-    return CurrentState(snapshot=snap, prev_snapshot=prev, source_mode=mode, market_phase=phase)
-
-
-# =============================
-# Scoring
-# =============================
-def model_tables(model: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    summary = pd.DataFrame(model.get("summary", []))
-    combos = pd.DataFrame(model.get("combos", []))
-    weekly = pd.DataFrame(model.get("weekly", {}).get("summary", []))
-    return summary, combos, weekly
-
-
-def current_feature_value(feature: str, snapshot: Dict[str, float]) -> float:
-    if feature.endswith("_close"):
-        sym = feature.replace("_close", "")
-        if sym == "$NYMO":
-            return safe_float(snapshot.get("$NYMO_EFFECTIVE"))
-        return safe_float(snapshot.get(sym))
-    if feature.endswith("_bb20"):
-        sym = feature.replace("_bb20", "")
-        return safe_float(snapshot.get(f"{sym}_%B"))
-    return np.nan
-
-
-def evaluate_outcome_score(outcome: str, summary_df: pd.DataFrame, combo_df: pd.DataFrame, snapshot: Dict[str, float]) -> Tuple[float, pd.DataFrame, Dict]:
-    sub = summary_df[summary_df["Outcome"] == outcome].copy()
-    rows = []
-    scores = []
-    for _, r in sub.iterrows():
-        cur = current_feature_value(r["Feature"], snapshot)
-        sc = band_distance_score(cur, r["Q25"], r["Median"], r["Q75"])
-        scores.append(sc)
-        rows.append({
-            "Feature": r["Feature"],
-            "Current": cur,
-            "Median": r["Median"],
-            "Q25": r["Q25"],
-            "Q75": r["Q75"],
-            "Fit": sc,
-        })
-    detail = pd.DataFrame(rows)
-    core = float(np.nanmean(scores) * 100) if len(scores) else np.nan
-    combo_bonus = 0.0
-    combo_match = "None"
-    combo_sub = combo_df[combo_df["Outcome"] == outcome].copy() if not combo_df.empty else pd.DataFrame()
-    if not combo_sub.empty:
-        for _, r in combo_sub.iterrows():
-            ok = True
-            for feat in r.get("Features", []):
-                rr = sub[sub["Feature"] == feat]
-                if rr.empty:
-                    ok = False
-                    break
-                rr = rr.iloc[0]
-                cur = current_feature_value(feat, snapshot)
-                if pd.isna(cur) or not (rr["Q25"] <= cur <= rr["Q75"]):
-                    ok = False
-                    break
-            if ok:
-                combo_bonus = min(12.0, max(combo_bonus, 12.0 * min(1.0, float(r["Lift"]) - 1.0 + 0.3)))
-                combo_match = r["Combo"]
-                break
-    total = float(min(100.0, (0 if np.isnan(core) else core) + combo_bonus))
-    meta = {"combo_bonus": combo_bonus, "combo_match": combo_match}
-    return total, detail, meta
-
-
-def evaluate_weekly_overlay(weekly_df: pd.DataFrame, snapshot: Dict[str, float]) -> Tuple[float, pd.DataFrame]:
-    rows = []
-    scores = []
-    for _, r in weekly_df.iterrows():
-        feat = r["Feature"]
-        if feat.endswith("_close"):
-            sym = feat.replace("_close", "")
-            cur = safe_float(snapshot.get(f"W_{sym}", snapshot.get(sym)))
-        elif feat.endswith("_bb20"):
-            sym = feat.replace("_bb20", "")
-            cur = safe_float(snapshot.get(f"W_{sym}_%B"))
+    proxy_nymo = 100 * np.tanh(cur_raw / 1600.0)
+    prev_proxy_nymo = 100 * np.tanh(prev_raw / 1600.0)
+    proxy_delta = proxy_nymo - prev_proxy_nymo
+    state = "Unavailable"
+    if not pd.isna(proxy_nymo):
+        if proxy_nymo <= -70:
+            state = "Deep washout"
+        elif proxy_nymo <= -20:
+            state = "Negative but repairing" if proxy_delta > 0 else "Negative and weak"
+        elif proxy_nymo <= 20:
+            state = "Neutral / crossing"
         else:
-            cur = np.nan
-        sc = band_distance_score(cur, r["Q25"], r["Median"], r["Q75"])
-        scores.append(sc)
-        rows.append({"Feature": feat, "Current": cur, "Median": r["Median"], "Q25": r["Q25"], "Q75": r["Q75"], "Fit": sc})
-    detail = pd.DataFrame(rows)
-    return float(np.nanmean(scores) * 100) if len(scores) else np.nan, detail
+            state = "Positive thrust"
+    return {"proxy_nymo": proxy_nymo, "proxy_delta": proxy_delta, "proxy_state": state}
 
 
-def action_hierarchy(bounce: float, repair: float, regime: float, weekly: float, snapshot: Dict[str, float], canary_comp: float, canary_conf: float) -> Dict[str, str | float]:
+def nymo_effective(snapshot: Dict[str, float], prev_snapshot: Dict[str, float], use_proxy: bool) -> Dict[str, float]:
+    official = safe_float(snapshot.get("$NYMO", np.nan))
+    prior = safe_float(prev_snapshot.get("$NYMO", np.nan))
+    proxy = compute_proxy_nymo(snapshot, prev_snapshot)
+    if use_proxy or pd.isna(official):
+        return {"label": "NYMO Proxy", "value": proxy["proxy_nymo"], "delta": proxy["proxy_delta"], "mode": "Proxy", "state": proxy["proxy_state"]}
+    return {"label": "Official NYMO", "value": official, "delta": official - prior if pd.notna(prior) else np.nan, "mode": "Official", "state": "Official series"}
+
+
+def action_hierarchy(bounce_score: float, repair_score: float, regime_score: float, weekly_score: float,
+                     cluster_name: Optional[str], nymo_eff: Dict[str, float], canary_score: float,
+                     walkforward_alpha: float) -> Dict[str, object]:
     existing = "Stay defensive / monitor"
     new = "No new long"
     add = "Do not add"
     rsp_size = 0.0
     ursp_size = 0.0
+    rationale = "Signals do not yet align strongly enough."
 
-    bpspx_bb = safe_float(snapshot.get("$BPSPX_%B"))
-    spxa50r = safe_float(snapshot.get("$SPXA50R"))
-    nymo = safe_float(snapshot.get("$NYMO_EFFECTIVE"))
-    if regime >= 72 and weekly >= 65 and canary_comp > 0.05 and canary_conf >= 55 and bpspx_bb >= 0.45 and spxa50r >= 55 and nymo > -10:
+    canary_ok = pd.notna(canary_score) and canary_score >= 55
+    wf_ok = pd.notna(walkforward_alpha) and walkforward_alpha >= 0
+    if (repair_score >= 70 and regime_score >= 60 and weekly_score >= 60 and nymo_eff["value"] > -20 and
+        cluster_name in {"Repair cluster", "Durable regime"} and canary_ok and wf_ok):
         existing = "Keep long bias"
-        new = "New RSP okay; URSP allowed selectively"
-        add = "Add on hold / breakout confirmation"
+        new = "New RSP okay; URSP selectively allowed"
+        add = "Can add on confirmation holds"
         rsp_size = 0.30
-        ursp_size = 0.10
-    elif repair >= 60 and bounce >= 45 and weekly >= 45 and canary_comp > -0.05:
-        existing = "Hold / keep existing probe"
+        ursp_size = 0.10 if regime_score >= 72 and weekly_score >= 70 and canary_score >= 62 else 0.0
+        rationale = "Empirical repair/regime sweet spots align, the canary overlay confirms, and walk-forward alpha is positive."
+    elif bounce_score >= 65 and repair_score >= 55 and canary_ok:
+        existing = "Hold / keep probe"
         new = "New RSP okay"
-        add = "Add only if breadth keeps improving"
+        add = "Add only after follow-through"
         rsp_size = 0.20
-    elif bounce >= 50:
-        existing = "Small probe only"
+        rationale = "Current breadth matches historical bounce/repair zones reasonably well and the canaries are not contradicting it."
+    elif bounce_score >= 55:
+        existing = "Small probe only if already engaged"
         new = "New probe RSP only"
-        add = "No adds yet"
+        add = "Do not add yet"
         rsp_size = 0.10
+        rationale = "The setup resembles a bounce zone, but confirmation is incomplete."
+
+    return {"existing": existing, "new": new, "add": add, "rsp_size": rsp_size, "ursp_size": ursp_size, "rationale": rationale}
+
+
+def classify_delta(sym: str, cur: float, prev: float) -> str:
+    if pd.isna(cur) or pd.isna(prev):
+        return "n/a"
+    d = cur - prev
+    if sym == "$BPSPX_%B":
+        if d >= 0.12: return "Shock+"
+        if d >= 0.05: return "Thrust"
+        if d <= -0.12: return "Shock-"
+        if d <= -0.05: return "Collapse"
+    elif sym in {"$SPXA50R", "$BPNYA", "$OEXA200R", "$BPSPX"}:
+        if d >= 8: return "Shock+"
+        if d >= 3: return "Thrust"
+        if d <= -8: return "Shock-"
+        if d <= -3: return "Collapse"
+    elif sym in {"$NYMO", "$NYSI", "$NYHL", "$NYAD", "$SPXADP"}:
+        if d >= 25: return "Shock+"
+        if d >= 10: return "Thrust"
+        if d <= -25: return "Shock-"
+        if d <= -10: return "Collapse"
+    elif sym == "$CPCE":
+        if d >= 0.12: return "Fear spike"
+        if d <= -0.12: return "Fear fade"
+    elif sym == "RSP:SPY":
+        if d >= 0.01: return "Leadership thrust"
+        if d <= -0.01: return "Leadership fade"
+    return "Improve" if d > 0 else "Fade" if d < 0 else "Flat"
+
+# -----------------------------
+# Backtests
+# -----------------------------
+def breadth_oscillator(score_series: pd.Series, fast: int = 5, slow: int = 13) -> pd.Series:
+    ef = ema(score_series, fast)
+    es = ema(score_series, slow)
+    return (ef - es) / es.replace(0, np.nan)
+
+
+def backtest_from_signal(df: pd.DataFrame, signal: pd.Series, asset_col: str = "RSP", switch_cost_bps: float = 0.0) -> pd.DataFrame:
+    out = df[[asset_col]].copy().dropna()
+    out["asset_ret"] = out[asset_col].pct_change().fillna(0)
+    out["signal"] = signal.reindex(out.index).fillna(0).astype(float).shift(1).fillna(0)
+    switch = out["signal"].diff().abs().fillna(0)
+    cost = (switch_cost_bps / 10000.0) * switch
+    out["strategy_ret"] = out["signal"] * out["asset_ret"] - cost
+    out["equity_strategy"] = (1 + out["strategy_ret"]).cumprod()
+    out["equity_buyhold"] = (1 + out["asset_ret"]).cumprod()
+    return out.reset_index().rename(columns={"index": "date"})
+
+
+def max_drawdown(equity: pd.Series) -> float:
+    peak = equity.cummax()
+    dd = equity / peak - 1
+    return float(dd.min()) if len(dd) else np.nan
+
+
+def sharpe_ratio(ret: pd.Series, periods_per_year: int = 252) -> float:
+    s = pd.to_numeric(ret, errors="coerce").dropna()
+    if len(s) < 2 or s.std() == 0:
+        return np.nan
+    return float(np.sqrt(periods_per_year) * s.mean() / s.std())
+
+
+def walkforward_validation(outcomes: pd.DataFrame, sweet_spot_features: List[str], step: int = 20, min_train: int = 252) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    rows = []
+    dates = outcomes.index.sort_values()
+    for end_ix in range(min_train, len(dates) - 61, step):
+        train = outcomes.iloc[:end_ix].copy()
+        test = outcomes.iloc[end_ix:end_ix + step].copy()
+        sweet_spots = {lbl: summarize_feature_bands(train, lbl, sweet_spot_features) for lbl in ["bounce", "repair", "regime"]}
+        for dt, row in test.iterrows():
+            _, totals = score_snapshot_against_bands(row.to_dict(), sweet_spots)
+            mean_score = np.nanmean([totals.get("bounce", np.nan), totals.get("repair", np.nan), totals.get("regime", np.nan)])
+            rows.append({
+                "date": dt,
+                "wf_score": mean_score,
+                "ret_20": row.get("ret_20", np.nan),
+                "ret_60": row.get("ret_60", np.nan),
+                "regime": row.get("regime", False),
+            })
+    wf = pd.DataFrame(rows).sort_values("date") if rows else pd.DataFrame()
+    if wf.empty:
+        return wf, {"alpha": np.nan, "hit_rate": np.nan}
+    hi = wf[wf["wf_score"] >= wf["wf_score"].quantile(0.70)]
+    lo = wf[wf["wf_score"] <= wf["wf_score"].quantile(0.30)]
+    alpha = hi["ret_20"].mean() - lo["ret_20"].mean() if not hi.empty and not lo.empty else np.nan
+    hit = float((hi["ret_20"] > 0).mean()) if not hi.empty else np.nan
+    return wf, {"alpha": alpha, "hit_rate": hit}
+
+# -----------------------------
+# Persistence
+# -----------------------------
+def save_model_artifacts(daily_feat, weekly_feat, sweet_spots, weekly_bands, combo_tables, cluster_stats, cluster_artifacts, outcomes, canary_df, wf_df, wf_stats, issues):
+    daily_feat.to_parquet(HIST_DAILY_PATH, index=False)
+    weekly_feat.to_parquet(HIST_WEEKLY_PATH, index=False)
+    outcomes.to_parquet(APP_DIR / "outcomes.parquet")
+    canary_df.to_parquet(APP_DIR / "canary.parquet") if not canary_df.empty else None
+    wf_df.to_parquet(APP_DIR / "walkforward.parquet") if not wf_df.empty else None
+    save_json(SWEET_SPOT_PATH, {"daily": sweet_spots, "weekly": weekly_bands, "combos": combo_tables, "issues": issues, "wf_stats": wf_stats})
+    save_json(CLUSTER_INFO_PATH, {"cluster_stats": cluster_stats.to_dict(orient="records"), "artifacts": asdict(cluster_artifacts)})
+    save_json(MODEL_META_PATH, {"saved_at": datetime.now().isoformat(), "daily_rows": int(len(daily_feat)), "weekly_rows": int(len(weekly_feat))})
+
+
+def load_model_artifacts():
+    if not HIST_DAILY_PATH.exists() or not SWEET_SPOT_PATH.exists() or not CLUSTER_INFO_PATH.exists():
+        return None
+    daily_feat = pd.read_parquet(HIST_DAILY_PATH)
+    weekly_feat = pd.read_parquet(HIST_WEEKLY_PATH) if HIST_WEEKLY_PATH.exists() else pd.DataFrame()
+    outcomes = pd.read_parquet(APP_DIR / "outcomes.parquet") if (APP_DIR / "outcomes.parquet").exists() else None
+    canary_df = pd.read_parquet(APP_DIR / "canary.parquet") if (APP_DIR / "canary.parquet").exists() else pd.DataFrame()
+    wf_df = pd.read_parquet(APP_DIR / "walkforward.parquet") if (APP_DIR / "walkforward.parquet").exists() else pd.DataFrame()
+    sweet_json = load_json(SWEET_SPOT_PATH, {})
+    cluster_json = load_json(CLUSTER_INFO_PATH, {})
+    artifacts = ClusterArtifacts(**cluster_json.get("artifacts", {})) if cluster_json.get("artifacts") else None
+    cluster_stats = pd.DataFrame(cluster_json.get("cluster_stats", []))
+    return daily_feat, weekly_feat, sweet_json, cluster_stats, artifacts, outcomes, canary_df, wf_df
+
+
+def append_upload_history(row: Dict):
+    hist = pd.read_csv(UPLOAD_HISTORY_PATH) if UPLOAD_HISTORY_PATH.exists() else pd.DataFrame()
+    hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
+    hist.to_csv(UPLOAD_HISTORY_PATH, index=False)
+
+# -----------------------------
+# Build model
+# -----------------------------
+def find_missing_core_features(wide_daily: pd.DataFrame) -> List[str]:
+    return [f for f in ["RSP", *KEY_FEATURES_FOR_SCORING] if f not in wide_daily.columns]
+
+
+def build_empirical_model(file_bytes: bytes, n_clusters: int = 6) -> Dict[str, object]:
+    daily, weekly, issues = parse_stockcharts_zip(file_bytes)
+    daily_feat = add_indicator_features(daily)
+    weekly_feat = add_indicator_features(weekly) if not weekly.empty else pd.DataFrame()
+    daily_wide = wide_from_hist(daily_feat)
+    weekly_wide = wide_from_hist(weekly_feat) if not weekly_feat.empty else pd.DataFrame()
+    missing = find_missing_core_features(daily_wide)
+    if "RSP" in missing:
+        raise ValueError("Historical zip must include RSP daily history.")
+    outcomes = label_outcomes(daily_wide)
+    sweet_spots = {label: summarize_feature_bands(outcomes, label, KEY_FEATURES_FOR_SCORING) for label in ["bounce", "repair", "regime"]}
+    combo_tables = {label: best_combo_zones(outcomes, label, KEY_FEATURES_FOR_SCORING).to_dict(orient="records") for label in ["bounce", "repair", "regime"]}
+    weekly_bands = {}
+    if not weekly_wide.empty:
+        for feat in WEEKLY_FEATURES:
+            if feat not in weekly_wide.columns:
+                continue
+            s = pd.to_numeric(weekly_wide[feat], errors="coerce").dropna()
+            if len(s) < 10:
+                continue
+            weekly_bands[feat] = {"median": float(s.median()), "q25": float(s.quantile(0.25)), "q75": float(s.quantile(0.75)), "std": float(0 if pd.isna(s.std()) else s.std())}
+    cluster_base = outcomes.dropna(subset=[f for f in KEY_FEATURES_FOR_SCORING if f in outcomes.columns]).copy()
+    cluster_features = [f for f in KEY_FEATURES_FOR_SCORING if f in cluster_base.columns]
+    cluster_stats, cluster_artifacts = build_clusters(cluster_base, cluster_features, n_clusters=n_clusters)
+    canary_df = build_canary_overlay_from_history(daily_wide)
+    wf_df, wf_stats = walkforward_validation(outcomes, [f for f in KEY_FEATURES_FOR_SCORING if f in outcomes.columns])
+    issues.extend([f"Missing daily features: {', '.join(missing)}"] if missing else [])
+    save_model_artifacts(daily_feat, weekly_feat, sweet_spots, weekly_bands, combo_tables, cluster_stats, cluster_artifacts, outcomes, canary_df, wf_df, wf_stats, issues)
     return {
-        "existing": existing,
-        "new": new,
-        "add": add,
-        "rsp_size": rsp_size,
-        "ursp_size": ursp_size,
+        "daily_feat": daily_feat,
+        "weekly_feat": weekly_feat,
+        "sweet_spots": sweet_spots,
+        "weekly_bands": weekly_bands,
+        "cluster_stats": cluster_stats,
+        "cluster_artifacts": cluster_artifacts,
+        "combo_tables": combo_tables,
+        "outcomes": outcomes,
+        "canary_df": canary_df,
+        "wf_df": wf_df,
+        "wf_stats": wf_stats,
+        "issues": issues,
+        "missing": missing,
     }
 
+# -----------------------------
+# Sidebar inputs
+# -----------------------------
+st.sidebar.header("Model Inputs")
+phase = market_phase()
+st.sidebar.markdown(f"**Market phase:** {phase}")
+auto_use_proxy = phase in {"Morning", "Midday", "Power Hour", "Post Close"}
+use_proxy = st.sidebar.toggle("Use proxy NYMO before official evening data", value=auto_use_proxy, help="Proxy NYMO uses (NYAD×0.6) + (SPXADP×0.4), compressed into a NYMO-like range.")
+show_debug = st.sidebar.toggle("Show debug tables", value=False)
+rebuild = st.sidebar.toggle("Force rebuild historical model", value=False)
+n_clusters = st.sidebar.slider("Cluster count", 3, 8, 6)
+switch_cost = st.sidebar.slider("Backtest switch cost (bps)", 0.0, 25.0, 2.0, 0.5)
 
-def classify_delta(sym: str, cur: float, prev: float) -> Tuple[str, str]:
-    if pd.isna(cur) or pd.isna(prev):
-        return "n/a", "missing"
-    delta = cur - prev
-    a = abs(delta)
-    # symbol-specific thresholds
-    if sym == "$BPSPX_%B":
-        if a >= 0.20:
-            return ("Shock+", "vertical repair") if delta > 0 else ("Shock-", "vertical damage")
-        if a >= 0.08:
-            return ("Thrust", "repairing quickly") if delta > 0 else ("Collapse", "breaking quickly")
-    elif sym in {"$SPXA50R", "$OEXA200R", "$BPNYA", "$NYHL"}:
-        if a >= 15:
-            return ("Shock+", "vertical repair") if delta > 0 else ("Shock-", "vertical damage")
-        if a >= 6:
-            return ("Thrust", "repairing quickly") if delta > 0 else ("Collapse", "breaking quickly")
-    elif sym in {"$NYMO", "$NYMO_EFFECTIVE"}:
-        if a >= 30:
-            return ("Shock+", "vertical repair") if delta > 0 else ("Shock-", "vertical damage")
-        if a >= 12:
-            return ("Thrust", "repairing quickly") if delta > 0 else ("Collapse", "breaking quickly")
-    elif sym in {"$NYSI"}:
-        if a >= 120:
-            return ("Shock+", "vertical repair") if delta > 0 else ("Shock-", "vertical damage")
-        if a >= 40:
-            return ("Thrust", "repairing quickly") if delta > 0 else ("Collapse", "breaking quickly")
-    elif sym in {"$CPCE"}:
-        if a >= 0.15:
-            return ("Shock+", "fear spike") if delta > 0 else ("Shock-", "fear unwind")
-        if a >= 0.06:
-            return ("Thrust", "fear building") if delta > 0 else ("Collapse", "fear fading")
-    elif sym in {"$NYAD", "$SPXADP"}:
-        if a >= 1500 if sym == "$NYAD" else a >= 60:
-            return ("Shock+", "breadth thrust") if delta > 0 else ("Shock-", "breadth washout")
-        if a >= 600 if sym == "$NYAD" else a >= 25:
-            return ("Thrust", "broadening") if delta > 0 else ("Collapse", "narrowing")
-    elif sym in {"RSP:SPY"}:
-        if a >= 0.02:
-            return ("Shock+", "leadership spike") if delta > 0 else ("Shock-", "leadership fade")
-        if a >= 0.006:
-            return ("Thrust", "leadership improving") if delta > 0 else ("Collapse", "leadership weakening")
-    if delta > 0:
-        return "Improve", "grinding higher"
-    if delta < 0:
-        return "Fade", "rolling over"
-    return "Flat", "flat"
+st.sidebar.markdown("---")
+hist_upload = st.sidebar.file_uploader("One-time historical upload (.zip)", type=["zip"])
+rt_upload = st.sidebar.file_uploader("Realtime snapshot upload (.csv)", type=["csv"])
 
+# -----------------------------
+# Load or build model with error handling
+# -----------------------------
+model = None
+model_errors = []
+if hist_upload is not None and (rebuild or not HIST_DAILY_PATH.exists()):
+    try:
+        with st.spinner("Building empirical sweet-spot + clustering model from historical zip..."):
+            model = build_empirical_model(hist_upload.read(), n_clusters=n_clusters)
+            st.sidebar.success("Historical model rebuilt.")
+    except Exception as e:
+        model_errors.append(str(e))
 
-def momentum_table(snapshot: Dict[str, float], prev_snapshot: Dict[str, float]) -> pd.DataFrame:
-    rows = []
-    for sym in MOMENTUM_SYMBOLS:
-        if sym.endswith("_%B"):
-            cur = safe_float(snapshot.get(sym))
-            prev = safe_float(prev_snapshot.get(sym))
-        else:
-            actual = "$NYMO_EFFECTIVE" if sym == "$NYMO" else sym
-            cur = safe_float(snapshot.get(actual))
-            prev = safe_float(prev_snapshot.get(sym)) if sym != "$NYMO" else safe_float(prev_snapshot.get("$NYMO"))
-        label, state = classify_delta(sym.replace("$NYMO", "$NYMO_EFFECTIVE"), cur, prev)
-        rows.append({
-            "Symbol": sym,
-            "Current": None if pd.isna(cur) else round(float(cur), 3),
-            "Prior": None if pd.isna(prev) else round(float(prev), 3),
-            "Delta": None if pd.isna(cur) or pd.isna(prev) else round(float(cur - prev), 3),
-            "Δ Class": label,
-            "State": state,
-        })
-    return pd.DataFrame(rows)
+if model is None:
+    loaded = load_model_artifacts()
+    if loaded is not None:
+        daily_feat, weekly_feat, sweet_json, cluster_stats, cluster_artifacts, outcomes, canary_df, wf_df = loaded
+        model = {
+            "daily_feat": daily_feat,
+            "weekly_feat": weekly_feat,
+            "sweet_spots": sweet_json.get("daily", {}),
+            "weekly_bands": sweet_json.get("weekly", {}),
+            "combo_tables": sweet_json.get("combos", {}),
+            "cluster_stats": cluster_stats,
+            "cluster_artifacts": cluster_artifacts,
+            "outcomes": outcomes if outcomes is not None else label_outcomes(wide_from_hist(daily_feat)),
+            "canary_df": canary_df,
+            "wf_df": wf_df,
+            "wf_stats": sweet_json.get("wf_stats", {}),
+            "issues": sweet_json.get("issues", []),
+            "missing": [],
+        }
 
-
-# =============================
-# Canary overlay from uploaded history
-# =============================
-def ratio_indicator_score(close: pd.Series) -> pd.Series:
-    if close.dropna().shape[0] < 220:
-        return pd.Series(dtype=float)
-    mh = macd_hist(close)
-    t, _ = tsi(close, 40, 20, 10)
-    stoch = stoch_from_close(close, 14, 3)
-    cci100 = ((close - close.rolling(100).mean()) / (0.015 * (close - close.rolling(100).mean()).abs().rolling(100).mean().replace(0, np.nan)))
-    df = pd.concat([mh.rename("macdh"), t.rename("tsi"), stoch.rename("stoch"), cci100.rename("cci")], axis=1).dropna()
-    if df.empty:
-        return pd.Series(dtype=float)
-    bull = (df["macdh"] > 0) & (df["tsi"] > 0) & (df["stoch"] > 50) & (df["cci"] > 0)
-    bear = (df["macdh"] < 0) & (df["tsi"] < 0) & (df["stoch"] < 50) & (df["cci"] < 0)
-    s = pd.Series(0.0, index=df.index)
-    s[bull] = 1.0
-    s[bear] = -1.0
-    return s
-
-
-def build_canary_from_history(daily_feat: pd.DataFrame) -> pd.DataFrame:
-    piv = pivot_feature_frame(daily_feat, [f"{s}_close" for s in CANARY_WEIGHTS.keys()])
-    score_map = {}
-    for sym, wt in CANARY_WEIGHTS.items():
-        col = f"{sym}_close"
-        if col not in piv.columns:
-            continue
-        s = piv[col].dropna()
-        sc = ratio_indicator_score(s)
-        if sc.empty:
-            continue
-        # VXX inverted: rising vol is bad
-        if sym == "VXX":
-            sc = -sc
-        score_map[sym] = sc
-    if not score_map:
-        return pd.DataFrame()
-    common = None
-    for s in score_map.values():
-        common = s.index if common is None else common.intersection(s.index)
-    if common is None or len(common) == 0:
-        return pd.DataFrame()
-    df = pd.DataFrame({k: v.loc[common] for k, v in score_map.items()}).dropna(how="all")
-    weights = pd.Series({k: CANARY_WEIGHTS[k] for k in df.columns})
-    weights = weights / weights.sum()
-    comp = (df * weights).sum(axis=1)
-    sign = np.sign(comp.replace(0, np.nan))
-    align = (np.sign(df).replace(0, np.nan).eq(sign, axis=0)).mean(axis=1).fillna(0)
-    strength = df.abs().mean(axis=1).fillna(0)
-    conf = ((0.6 * align) + (0.4 * strength)) * 100.0
-    out = pd.DataFrame({"canary_comp": comp, "canary_conf": conf})
-    return out
-
-
-# =============================
-# Historical score series / backtest
-# =============================
-def build_score_series(daily_feat: pd.DataFrame, weekly_feat: pd.DataFrame, model: Dict) -> pd.DataFrame:
-    summary_df, combo_df, weekly_df = model_tables(model)
-    daily_pivot = pivot_feature_frame(daily_feat, list(set(PRIMARY_FEATURES + ["RSP_close"]))).dropna(subset=["RSP_close"]).copy()
-    if daily_pivot.empty:
-        return pd.DataFrame()
-    # add official NYMO effective placeholder and map required columns back into snapshot per date
-    canary = build_canary_from_history(daily_feat)
-    weekly_pivot = pivot_feature_frame(weekly_feat, list(set(WEEKLY_FEATURES + ["RSP_close"]))) if not weekly_feat.empty else pd.DataFrame()
-    weekly_pivot = weekly_pivot.reindex(daily_pivot.index, method="ffill") if not weekly_pivot.empty else weekly_pivot
-
-    rows = []
-    prev_snapshot = None
-    for dt, row in daily_pivot.iterrows():
-        snapshot = {}
-        for feat in PRIMARY_FEATURES:
-            if feat in daily_pivot.columns:
-                if feat.endswith("_close"):
-                    snapshot[feat.replace("_close", "")] = row.get(feat)
-                elif feat.endswith("_bb20"):
-                    snapshot[f"{feat.replace('_bb20', '')}_%B"] = row.get(feat)
-        snapshot["RSP"] = row.get("RSP_close")
-        if "$NYMO" in snapshot:
-            snapshot["$NYMO_EFFECTIVE"] = snapshot["$NYMO"]
-        if not weekly_pivot.empty and dt in weekly_pivot.index:
-            wrow = weekly_pivot.loc[dt]
-            for feat in WEEKLY_FEATURES:
-                if feat in weekly_pivot.columns:
-                    if feat.endswith("_close"):
-                        snapshot[f"W_{feat.replace('_close', '')}"] = wrow.get(feat)
-                    elif feat.endswith("_bb20"):
-                        snapshot[f"W_{feat.replace('_bb20', '')}_%B"] = wrow.get(feat)
-        bounce, _, _ = evaluate_outcome_score("Bounce", summary_df, combo_df, snapshot)
-        repair, _, _ = evaluate_outcome_score("Repair", summary_df, combo_df, snapshot)
-        regime, _, _ = evaluate_outcome_score("Regime", summary_df, combo_df, snapshot)
-        weekly_score, _ = evaluate_weekly_overlay(weekly_df, snapshot) if not weekly_df.empty else (np.nan, pd.DataFrame())
-        canary_comp = canary.loc[dt, "canary_comp"] if not canary.empty and dt in canary.index else np.nan
-        canary_conf = canary.loc[dt, "canary_conf"] if not canary.empty and dt in canary.index else np.nan
-        master = 0.35 * bounce + 0.40 * repair + 0.25 * regime
-        if pd.notna(weekly_score):
-            master = 0.75 * master + 0.25 * weekly_score
-        rows.append({
-            "date": dt,
-            "rsp_close": row.get("RSP_close"),
-            "bounce_score": bounce,
-            "repair_score": repair,
-            "regime_score": regime,
-            "weekly_score": weekly_score,
-            "master_score": master,
-            "canary_comp": canary_comp,
-            "canary_conf": canary_conf,
-        })
-    return pd.DataFrame(rows)
-
-
-def run_backtest(score_df: pd.DataFrame, fast: int = 5, slow: int = 13, deadband: float = 0.0, use_canary: bool = True, canary_thr: float = 0.05, conf_thr: float = 55.0, switch_cost_bps: float = 5.0) -> pd.DataFrame:
-    bt = score_df.copy().sort_values("date").reset_index(drop=True)
-    bt["ema_fast"] = ema(bt["master_score"], fast)
-    bt["ema_slow"] = ema(bt["master_score"], slow)
-    bt["osc"] = (bt["ema_fast"] - bt["ema_slow"]) / bt["ema_slow"].replace(0, np.nan)
-    signal = bt["osc"] > deadband
-    if use_canary:
-        signal &= (bt["canary_comp"].fillna(-1) > canary_thr) & (bt["canary_conf"].fillna(0) >= conf_thr)
-    bt["signal_raw"] = signal.astype(int)
-    bt["signal"] = bt["signal_raw"].shift(1).fillna(0)
-    bt["ret"] = bt["rsp_close"].pct_change().fillna(0)
-    bt["turnover"] = bt["signal"].diff().abs().fillna(0)
-    cost = switch_cost_bps / 10000.0
-    bt["strategy_ret"] = bt["signal"] * bt["ret"] - bt["turnover"] * cost
-    bt["equity_strategy"] = (1 + bt["strategy_ret"]).cumprod()
-    bt["equity_buyhold"] = (1 + bt["ret"]).cumprod()
-    return bt
-
-
-# =============================
-# Rendering helpers
-# =============================
-def render_score_card(title: str, score: float, subtitle: str, meta: str = ""):
-    hex_color, fill = score_color(score)
-    st.markdown(
-        f"""
-        <div class="soft-card score-card">
-          <div>
-            <div class="score-title">{title}</div>
-            <div class="score-value">{score:.0f}</div>
-            <div class="score-sub" style="color:{hex_color};">{subtitle}</div>
-            <div class="small-muted" style="margin-top:.35rem;">{meta}</div>
-          </div>
-          <div class="score-bar"><div class="fill {fill}" style="width:{max(0,min(100,score))}%;"></div></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_action_box(label: str, value: str, cls: str):
-    st.markdown(f'<div class="action-box {cls}"><div class="section-title">{label}</div><div>{value}</div></div>', unsafe_allow_html=True)
-
-
-def plot_symbol_panel(hist_feat: pd.DataFrame, symbol: str, current_override: float | None = None):
-    g = hist_feat[hist_feat["symbol"] == symbol].sort_values("date").tail(220).copy()
-    if g.empty:
-        return None
-    if current_override is not None and not pd.isna(current_override):
-        g.iloc[-1, g.columns.get_loc("close")] = current_override
-        g = add_features(g)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Candlestick(x=g["date"], open=g["open"], high=g["high"], low=g["low"], close=g["close"], name=symbol), row=1, col=1)
-    fig.add_trace(go.Scatter(x=g["date"], y=g["ma20"], name="MA20", line=dict(width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=g["date"], y=g["ma50"], name="MA50", line=dict(width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=g["date"], y=g["bb20"], name="%B", line=dict(width=1.8)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=g["date"], y=g["rsi14"], name="RSI14", line=dict(width=1.3)), row=2, col=1)
-    fig.update_layout(height=500, margin=dict(l=10, r=10, t=30, b=10), xaxis_rangeslider_visible=False, template="plotly_dark", legend_orientation="h")
-    return fig
-
-
-# =============================
-# Sidebar / data loading
-# =============================
-with st.sidebar:
-    st.markdown("### Data")
-    historical_zip = st.file_uploader("One-time historical zip", type=["zip"], help="Upload the full StockCharts zip once. Daily files have no 'w'; weekly files do.")
-    realtime_csv = st.file_uploader("Realtime snapshot CSV", type=["csv"], help="Upload your current realtime breadth snapshot whenever you want to refresh the dashboard.")
-    rebuild = st.button("Rebuild historical model", use_container_width=True)
-    reset = st.button("Reset local store", use_container_width=True)
-    st.markdown("---")
-    st.markdown("### Backtest settings")
-    fast = st.slider("Oscillator fast EMA", 3, 15, 5)
-    slow = st.slider("Oscillator slow EMA", 8, 34, 13)
-    deadband = st.slider("Oscillator deadband", 0.0, 0.10, 0.0, 0.005)
-    use_canary = st.toggle("Use canary filter", value=True)
-    canary_thr = st.slider("Canary composite threshold", -0.20, 0.30, 0.05, 0.01)
-    conf_thr = st.slider("Canary confidence threshold", 0, 100, 55)
-
-if reset:
-    for p in [DAILY_PATH, WEEKLY_PATH, MODEL_PATH, UPLOAD_HISTORY_PATH]:
-        if p.exists():
-            p.unlink()
-    for p in SNAPSHOT_DIR.glob("*.csv"):
-        p.unlink()
-    st.success("Local store reset.")
-
-if historical_zip is not None and (rebuild or (not DAILY_PATH.exists()) or (not MODEL_PATH.exists())):
-    with st.spinner("Parsing historical zip and building sweet-spot model..."):
-        daily_raw, weekly_raw = parse_stockcharts_zip(historical_zip.getvalue())
-        daily_feat = add_features(daily_raw)
-        weekly_feat = add_features(weekly_raw)
-        model = build_sweetspot_model(daily_feat, weekly_feat)
-        daily_feat.to_parquet(DAILY_PATH, index=False)
-        weekly_feat.to_parquet(WEEKLY_PATH, index=False)
-        save_json(MODEL_PATH, model)
-    st.success("Historical sweet-spot model rebuilt.")
-
-if not DAILY_PATH.exists() or not MODEL_PATH.exists():
-    st.info("Upload your historical StockCharts zip in the sidebar to initialize the engine.")
+if model is None:
+    warning_box(model_errors, title="Build errors")
+    st.info("Upload your one-time `stockcharts.zip` baseline in the sidebar to build the model.")
     st.stop()
 
-daily_feat = pd.read_parquet(DAILY_PATH)
-weekly_feat = pd.read_parquet(WEEKLY_PATH) if WEEKLY_PATH.exists() else pd.DataFrame(columns=daily_feat.columns)
-model = load_json(MODEL_PATH, {})
-summary_df, combo_df, weekly_model_df = model_tables(model)
+warning_box(model_errors + model.get("issues", []), title="Model notes")
 
-realtime_df = None
-if realtime_csv is not None:
-    realtime_df = parse_realtime_snapshot(realtime_csv.getvalue())
-    snap_path = save_snapshot_file(realtime_df)
-else:
-    hist = load_upload_history()
-    if not hist.empty and "snapshot_file" in hist.columns:
-        p = Path(hist.sort_values("upload_ts").iloc[-1]["snapshot_file"])
-        if p.exists():
-            realtime_df = pd.read_csv(p)
-            snap_path = str(p)
-        else:
-            snap_path = ""
-    else:
-        snap_path = ""
+# -----------------------------
+# Current snapshot
+# -----------------------------
+rt_df = None
+snap_path = None
+if rt_upload is not None:
+    try:
+        rt_df = parse_realtime_snapshot(rt_upload.read())
+        snap_path = SNAPSHOT_DIR / f"snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        rt_df.to_csv(snap_path, index=False)
+    except Exception as e:
+        st.error(f"Realtime snapshot could not be parsed: {e}")
 
-state = build_current_state(daily_feat, weekly_feat, realtime_df)
+latest_snap, prev_snap, latest_date = current_snapshot_from_hist(model["daily_feat"], rt_df)
+weekly_snap, weekly_prev, weekly_latest_date = current_snapshot_from_hist(model["weekly_feat"], None) if not model["weekly_feat"].empty else ({}, {}, None)
 
-bounce_score, bounce_detail, bounce_meta = evaluate_outcome_score("Bounce", summary_df, combo_df, state.snapshot)
-repair_score, repair_detail, repair_meta = evaluate_outcome_score("Repair", summary_df, combo_df, state.snapshot)
-regime_score, regime_detail, regime_meta = evaluate_outcome_score("Regime", summary_df, combo_df, state.snapshot)
-weekly_overlay, weekly_detail = evaluate_weekly_overlay(weekly_model_df, state.snapshot) if not weekly_model_df.empty else (np.nan, pd.DataFrame())
+nymo_eff = nymo_effective(latest_snap, prev_snap, use_proxy)
+band_df, total_scores = score_snapshot_against_bands(latest_snap, model["sweet_spots"])
+weekly_df, weekly_score = weekly_overlay_score(weekly_snap, model["weekly_bands"]) if model["weekly_bands"] else (pd.DataFrame(), np.nan)
+cluster_id, cluster_name, cluster_conf = predict_cluster(latest_snap, model["cluster_artifacts"]) if model["cluster_artifacts"] else (None, None, None)
+canary_score = np.nan
+if not model["canary_df"].empty:
+    canary_score = safe_float(model["canary_df"]["canary_score"].iloc[-1])
+walkforward_alpha = safe_float(model.get("wf_stats", {}).get("alpha", np.nan))
+actions = action_hierarchy(total_scores.get("bounce", np.nan), total_scores.get("repair", np.nan), total_scores.get("regime", np.nan), weekly_score, cluster_name, nymo_eff, canary_score, walkforward_alpha)
 
-score_df = build_score_series(daily_feat, weekly_feat, model)
-canary_hist = build_canary_from_history(daily_feat)
-if not canary_hist.empty:
-    last_canary_comp = float(canary_hist.iloc[-1]["canary_comp"])
-    last_canary_conf = float(canary_hist.iloc[-1]["canary_conf"])
-else:
-    last_canary_comp = np.nan
-    last_canary_conf = np.nan
+append_upload_history({
+    "upload_ts": datetime.now().isoformat(timespec="seconds"),
+    "latest_hist_date": str(latest_date.date()) if pd.notna(latest_date) else None,
+    "phase": phase,
+    "use_proxy": use_proxy,
+    "bounce_score": total_scores.get("bounce", np.nan),
+    "repair_score": total_scores.get("repair", np.nan),
+    "regime_score": total_scores.get("regime", np.nan),
+    "weekly_score": weekly_score,
+    "cluster": cluster_name,
+    "canary_score": canary_score,
+    "snapshot_file": str(snap_path) if snap_path else None,
+})
 
-actions = action_hierarchy(bounce_score, repair_score, regime_score, weekly_overlay, state.snapshot, last_canary_comp, last_canary_conf)
-master_score = 0.35 * bounce_score + 0.40 * repair_score + 0.25 * regime_score
-if pd.notna(weekly_overlay):
-    master_score = 0.75 * master_score + 0.25 * weekly_overlay
+# Alerts
+alerts = []
+if total_scores.get("repair", 0) >= 70 and canary_score >= 55:
+    alerts.append("Repair score and canary overlay are aligned.")
+if cluster_name == "Capitulation / washout" and total_scores.get("bounce", 0) >= 60:
+    alerts.append("Washout cluster plus strong bounce score: probe conditions may be forming.")
+if pd.notna(weekly_score) and weekly_score < 40:
+    alerts.append("Weekly overlay is weak. Be careful adding leverage.")
+if nymo_eff["mode"] == "Proxy":
+    alerts.append("Using proxy NYMO. Re-check after official EOD breadth refresh.")
 
-if realtime_df is not None and not realtime_df.empty:
-    append_upload_history({
-        "upload_ts": datetime.now().isoformat(timespec="seconds"),
-        "snapshot_file": snap_path,
-        "master_score": master_score,
-        "bounce_score": bounce_score,
-        "repair_score": repair_score,
-        "regime_score": regime_score,
-        "weekly_overlay": weekly_overlay,
-    })
+# -----------------------------
+# Top layout
+# -----------------------------
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown('<div class="soft-card">', unsafe_allow_html=True)
+    st.markdown("<div style='font-size:1.05rem;font-weight:800;'>Realtime decision frame</div>", unsafe_allow_html=True)
+    pills = [f"<span class='pill pill-blue'>{phase}</span>", f"<span class='pill {'pill-yellow' if use_proxy else 'pill-green'}'>{nymo_eff['label']}</span>"]
+    if cluster_name:
+        pills.append(f"<span class='pill pill-purple'>{cluster_name}</span>")
+    st.markdown("".join(pills), unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='kpi-grid'>"
+        f"<div class='kpi-box'><div class='kpi-label'>Latest baseline date</div><div class='kpi-value'>{latest_date.date() if pd.notna(latest_date) else 'n/a'}</div></div>"
+        f"<div class='kpi-box'><div class='kpi-label'>Cluster confidence</div><div class='kpi-value'>{'n/a' if cluster_conf is None else f'{cluster_conf*100:.0f}%'}</div></div>"
+        f"<div class='kpi-box'><div class='kpi-label'>Canary score</div><div class='kpi-value'>{fmt_num(canary_score,0)}</div></div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+with col2:
+    st.markdown('<div class="soft-card">', unsafe_allow_html=True)
+    st.markdown("<div style='font-size:1.05rem;font-weight:800;'>Action hierarchy</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='action-box action-existing'><b>Existing:</b> {actions['existing']}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='action-box action-new'><b>New:</b> {actions['new']}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='action-box action-add'><b>Add:</b> {actions['add']}</div>", unsafe_allow_html=True)
+    st.caption(f"Target sizing → RSP: {actions['rsp_size']:.0%} | URSP: {actions['ursp_size']:.0%}. {actions['rationale']}")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-# =============================
-# Main tabs
-# =============================
-tab1, tab2, tab3 = st.tabs(["Decision Dashboard", "Backtest + Oscillator", "Sweet Spot Explorer"])
+r1, r2, r3, r4 = st.columns(4)
+with r1: score_card("Bounce score", float(total_scores.get("bounce", np.nan) or 0), 100, "Historical bounce sweet-spot match")
+with r2: score_card("Repair score", float(total_scores.get("repair", np.nan) or 0), 100, "Historical repair sweet-spot match")
+with r3: score_card("Regime score", float(total_scores.get("regime", np.nan) or 0), 100, "Durable participation regime match")
+with r4: score_card("Weekly overlay", float(weekly_score if not pd.isna(weekly_score) else 0), 100, "Weekly backdrop / durability filter")
+
+if alerts:
+    st.info("\n".join([f"• {x}" for x in alerts]))
+
+# -----------------------------
+# Tabs
+# -----------------------------
+tab1, tab2, tab3, tab4 = st.tabs(["Decision Dashboard", "Oscillator + Backtest", "Sweet Spot Explorer", "Validation + Export"])
 
 with tab1:
-    left, right = st.columns([1.35, 0.95], gap="large")
-    with left:
-        st.markdown('<div class="score-grid">', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            render_score_card("Bounce Score", bounce_score, "Oversold-to-bounce fit", f"Combo bonus: {bounce_meta['combo_bonus']:.1f}")
-        with c2:
-            render_score_card("Repair Score", repair_score, "Breadth repair fit", f"Combo bonus: {repair_meta['combo_bonus']:.1f}")
-        c3, c4 = st.columns(2)
-        with c3:
-            render_score_card("Regime Score", regime_score, "Durable participation fit", f"Combo bonus: {regime_meta['combo_bonus']:.1f}")
-        with c4:
-            render_score_card("Weekly Overlay", 0 if pd.isna(weekly_overlay) else weekly_overlay, "Weekly backdrop", "Uses weekly historical sweet spots")
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown('<div class="soft-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-title">At a Glance</div>', unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div class="kpi-row">
-              <div class="kpi-box"><div class="kpi-label">Master Score</div><div class="kpi-value">{master_score:.0f}</div></div>
-              <div class="kpi-box"><div class="kpi-label">Market Phase</div><div class="kpi-value" style="font-size:1.35rem;">{state.market_phase}</div></div>
-              <div class="kpi-box"><div class="kpi-label">Breadth Source</div><div class="kpi-value" style="font-size:1.1rem;">{state.source_mode}</div></div>
-              <div class="kpi-box"><div class="kpi-label">Canary</div><div class="kpi-value">{fmt_num(last_canary_comp,2)} / {fmt_num(last_canary_conf,0)}</div></div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        pills = []
-        pills.append(f'<span class="pill pill-blue">NYMO effective: {fmt_num(state.snapshot.get("$NYMO_EFFECTIVE"),1)}</span>')
-        pills.append(f'<span class="pill pill-yellow">BPSPX %B: {fmt_num(state.snapshot.get("$BPSPX_%B"),2)}</span>')
-        pills.append(f'<span class="pill pill-green">SPXA50R: {fmt_num(state.snapshot.get("$SPXA50R"),1)}</span>')
-        pills.append(f'<span class="pill pill-red">CPCE: {fmt_num(state.snapshot.get("$CPCE"),2)}</span>')
-        st.markdown("".join(pills), unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns([1.1, 0.9])
+    with c1:
+        st.subheader("Sweet-spot scoring detail")
+        show_cols = ["Outcome", "Feature", "Current", "Median", "Q25", "Q75", "Band Score"]
+        st.dataframe(band_df[show_cols].round(3), use_container_width=True, hide_index=True)
+        st.subheader("Momentum context")
+        momentum_features = [f for f in ["$BPSPX_%B", "$BPNYA", "$OEXA200R", "$SPXA50R", "$NYMO", "$NYSI", "$CPCE", "$NYHL", "RSP:SPY"] if f in latest_snap or f in prev_snap]
+        m_rows = []
+        for sym in momentum_features:
+            cur = safe_float(latest_snap.get(sym, np.nan))
+            prev = safe_float(prev_snap.get(sym, np.nan))
+            m_rows.append({"Feature": sym, "Current": cur, "Prior": prev, "Delta": cur - prev if pd.notna(cur) and pd.notna(prev) else np.nan, "Class": classify_delta(sym, cur, prev)})
+        st.dataframe(pd.DataFrame(m_rows).round(3), use_container_width=True, hide_index=True)
+    with c2:
+        st.subheader("Proxy governance")
+        st.markdown(f"**Mode:** {nymo_eff['mode']}")
+        st.markdown(f"**{nymo_eff['label']}:** {fmt_num(nymo_eff['value'])}")
+        st.markdown(f"**Delta:** {fmt_num(nymo_eff['delta'])}")
+        st.markdown(f"**State:** {nymo_eff['state']}")
+        st.subheader("Cluster regime")
+        if cluster_name:
+            st.markdown(f"**Current cluster:** {cluster_name}")
+            st.markdown(f"**Confidence:** {cluster_conf*100:.1f}%")
+            st.markdown(f"**Silhouette:** {fmt_num(model['cluster_artifacts'].silhouette,3)}")
+            st.markdown(f"**Stability:** {fmt_num(model['cluster_artifacts'].stability,3)}")
+            stats_map = model["cluster_artifacts"].cluster_stats.get(str(cluster_id), {}) if model["cluster_artifacts"] else {}
+            if stats_map:
+                st.markdown(f"Bounce hit rate: {stats_map.get('bounce_rate', np.nan):.1%}")
+                st.markdown(f"Repair hit rate: {stats_map.get('repair_rate', np.nan):.1%}")
+                st.markdown(f"Regime hit rate: {stats_map.get('regime_rate', np.nan):.1%}")
+        if not weekly_df.empty:
+            st.subheader("Weekly overlay detail")
+            st.dataframe(weekly_df.round(3), use_container_width=True, hide_index=True)
+        if not model["canary_df"].empty:
+            st.subheader("Canary overlay")
+            st.markdown(f"**Latest canary score:** {fmt_num(canary_score,1)}")
+            st.line_chart(model["canary_df"][["canary_score"]].tail(180), height=180)
 
-        st.markdown("### Current Action Hierarchy")
-        render_action_box("Existing", actions["existing"], "action-existing")
-        render_action_box("New", actions["new"], "action-new")
-        render_action_box("Add", actions["add"], "action-add")
-        st.markdown(
-            f"<div class='small-muted'>Suggested sizing: RSP {actions['rsp_size']*100:.0f}% | URSP {actions['ursp_size']*100:.0f}%</div>",
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("### Momentum Context")
-        st.dataframe(momentum_table(state.snapshot, state.prev_snapshot), use_container_width=True, hide_index=True)
-
-    with right:
-        st.markdown("### Sweet Spot Match Detail")
-        subtab1, subtab2, subtab3, subtab4 = st.tabs(["Bounce", "Repair", "Regime", "Weekly"])
-        with subtab1:
-            show = bounce_detail.copy()
-            for col in ["Current", "Median", "Q25", "Q75", "Fit"]:
-                show[col] = pd.to_numeric(show[col], errors="coerce").round(3)
-            st.dataframe(show, use_container_width=True, hide_index=True)
-            st.caption(f"Best current combo match: {bounce_meta['combo_match']}")
-        with subtab2:
-            show = repair_detail.copy()
-            for col in ["Current", "Median", "Q25", "Q75", "Fit"]:
-                show[col] = pd.to_numeric(show[col], errors="coerce").round(3)
-            st.dataframe(show, use_container_width=True, hide_index=True)
-            st.caption(f"Best current combo match: {repair_meta['combo_match']}")
-        with subtab3:
-            show = regime_detail.copy()
-            for col in ["Current", "Median", "Q25", "Q75", "Fit"]:
-                show[col] = pd.to_numeric(show[col], errors="coerce").round(3)
-            st.dataframe(show, use_container_width=True, hide_index=True)
-            st.caption(f"Best current combo match: {regime_meta['combo_match']}")
-        with subtab4:
-            if weekly_detail.empty:
-                st.info("No weekly model available from the uploaded history.")
-            else:
-                show = weekly_detail.copy()
-                for col in ["Current", "Median", "Q25", "Q75", "Fit"]:
-                    show[col] = pd.to_numeric(show[col], errors="coerce").round(3)
-                st.dataframe(show, use_container_width=True, hide_index=True)
-
-        st.markdown("### Chart Panel")
-        chart_sym = st.selectbox("Symbol", CHART_SYMBOLS, index=0)
-        override = state.snapshot.get(chart_sym)
-        fig = plot_symbol_panel(daily_feat, chart_sym, override)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-
-with tab2:
-    if score_df.empty:
-        st.warning("Not enough data to build the historical oscillator.")
-    else:
-        bt = run_backtest(score_df, fast=fast, slow=slow, deadband=deadband, use_canary=use_canary, canary_thr=canary_thr, conf_thr=conf_thr)
-        total_ret = bt["equity_strategy"].iloc[-1] - 1
-        bh_ret = bt["equity_buyhold"].iloc[-1] - 1
-        max_dd = (bt["equity_strategy"] / bt["equity_strategy"].cummax() - 1).min()
-        exposure = bt["signal"].mean()
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Strategy return", f"{total_ret:.1%}")
-        k2.metric("Buy & hold", f"{bh_ret:.1%}")
-        k3.metric("Max drawdown", f"{max_dd:.1%}")
-        k4.metric("Exposure", f"{exposure:.1%}")
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=bt["date"], y=bt["equity_strategy"], name="Strategy", line=dict(width=2.4)))
-        fig.add_trace(go.Scatter(x=bt["date"], y=bt["equity_buyhold"], name="Buy & Hold", line=dict(width=2.0)))
-        fig.update_layout(height=420, template="plotly_dark", title="Equity Curve", margin=dict(l=10, r=10, t=40, b=10))
+    st.subheader("Breadth chart panel")
+    chart_syms = [s for s in ["$BPSPX", "$SPXA50R", "$NYMO", "$NYSI", "$CPCE", "RSP"] if s in model["daily_feat"]["symbol"].unique()]
+    sel = st.selectbox("Chart symbol", options=chart_syms, index=0 if chart_syms else None)
+    if sel:
+        g = model["daily_feat"][model["daily_feat"]["symbol"] == sel].sort_values("date").tail(180).copy()
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.55, 0.22, 0.23])
+        fig.add_trace(go.Candlestick(x=g["date"], open=g["open"], high=g["high"], low=g["low"], close=g["close"], name=sel), row=1, col=1)
+        fig.add_trace(go.Scatter(x=g["date"], y=g["ma20"], name="MA20"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=g["date"], y=g["ma50"], name="MA50"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=g["date"], y=g["pct_b20"], name="%B"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=g["date"], y=g["rsi14"], name="RSI14"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=g["date"], y=g["cci20"], name="CCI20"), row=3, col=1)
+        fig.update_layout(height=780, xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=30, b=20))
         st.plotly_chart(fig, use_container_width=True)
 
-        fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.6, 0.4])
-        fig2.add_trace(go.Scatter(x=bt["date"], y=bt["rsp_close"], name="RSP", line=dict(width=1.8)), row=1, col=1)
-        fig2.add_trace(go.Scatter(x=bt["date"], y=bt["osc"], name="Breadth Osc", line=dict(width=1.8)), row=2, col=1)
-        if "canary_comp" in bt.columns:
-            fig2.add_trace(go.Scatter(x=bt["date"], y=bt["canary_comp"], name="Canary Composite", line=dict(width=1.5)), row=2, col=1)
-        fig2.update_layout(height=500, template="plotly_dark", title="RSP + Sweet Spot Oscillator", margin=dict(l=10, r=10, t=40, b=10))
+with tab2:
+    st.subheader("Breadth oscillator backtest")
+    outcomes = model["outcomes"].copy().sort_index()
+    score_rows = []
+    for dt, row in outcomes.iterrows():
+        _, totals = score_snapshot_against_bands(row.to_dict(), model["sweet_spots"])
+        score_rows.append(np.nanmean([totals.get("bounce", np.nan), totals.get("repair", np.nan), totals.get("regime", np.nan)]))
+    outcomes["sweetspot_score"] = score_rows
+    outcomes["oscillator"] = breadth_oscillator(outcomes["sweetspot_score"])
+    signal = (outcomes["oscillator"] > 0).astype(float)
+    if not model["canary_df"].empty:
+        signal = signal * ((model["canary_df"]["canary_score"].reindex(outcomes.index).fillna(0) >= 50).astype(float))
+    bt = backtest_from_signal(outcomes, signal, asset_col="RSP", switch_cost_bps=switch_cost)
+    if not bt.empty:
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.metric("Strategy return", f"{(bt['equity_strategy'].iloc[-1]-1):.1%}")
+        with c2: st.metric("Buy & hold", f"{(bt['equity_buyhold'].iloc[-1]-1):.1%}")
+        with c3: st.metric("Strategy max DD", f"{max_drawdown(bt['equity_strategy']):.1%}")
+        with c4: st.metric("Strategy Sharpe", f"{fmt_num(sharpe_ratio(bt['strategy_ret']),2)}")
+        fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.07, row_heights=[0.62, 0.38])
+        fig2.add_trace(go.Scatter(x=bt["date"], y=bt["equity_strategy"], name="Strategy", line=dict(width=2)), row=1, col=1)
+        fig2.add_trace(go.Scatter(x=bt["date"], y=bt["equity_buyhold"], name="Buy & Hold", line=dict(width=2)), row=1, col=1)
+        fig2.add_trace(go.Scatter(x=outcomes.index, y=outcomes["oscillator"], name="Breadth Oscillator", line=dict(width=2)), row=2, col=1)
+        fig2.add_hline(y=0, row=2, col=1)
+        fig2.update_layout(height=680, margin=dict(l=20, r=20, t=30, b=20))
         st.plotly_chart(fig2, use_container_width=True)
-
-        st.markdown("### Historical Score Series")
-        show_cols = ["date", "bounce_score", "repair_score", "regime_score", "weekly_score", "master_score", "canary_comp", "canary_conf"]
-        st.dataframe(score_df[show_cols].tail(40).round(2), use_container_width=True, hide_index=True)
+    else:
+        st.info("Backtest unavailable; insufficient historical alignment.")
 
 with tab3:
-    st.markdown("### Empirical Sweet Spot Summary")
-    if summary_df.empty:
-        st.warning("Sweet-spot summary not available.")
-    else:
-        st.dataframe(summary_df.round(3), use_container_width=True, hide_index=True)
-    st.markdown("### Best Combo Zones")
-    if combo_df.empty:
-        st.info("No combo table available.")
-    else:
-        show = combo_df.copy()
-        if "Features" in show.columns:
-            show["Features"] = show["Features"].astype(str)
-        st.dataframe(show.round(3), use_container_width=True, hide_index=True)
-    st.markdown("### Upload History")
-    hist = load_upload_history()
-    if hist.empty:
-        st.info("No realtime snapshot uploads recorded yet.")
-    else:
-        st.dataframe(hist.tail(25), use_container_width=True, hide_index=True)
+    st.subheader("Empirical sweet-spot explorer")
+    ss_choice = st.selectbox("Outcome", ["bounce", "repair", "regime"], index=1)
+    ss_table = pd.DataFrame(model["sweet_spots"].get(ss_choice, {})).T.reset_index().rename(columns={"index": "Feature"})
+    if not ss_table.empty:
+        st.dataframe(ss_table.round(3), use_container_width=True, hide_index=True)
+    combos = pd.DataFrame(model["combo_tables"].get(ss_choice, []))
+    if not combos.empty:
+        st.subheader("Top combo zones")
+        st.dataframe(combos.round(3), use_container_width=True, hide_index=True)
+    if not model["cluster_stats"].empty:
+        st.subheader("Cluster map")
+        st.dataframe(model["cluster_stats"].round(3), use_container_width=True, hide_index=True)
+
+with tab4:
+    st.subheader("Validation + export")
+    wf_df = model.get("wf_df", pd.DataFrame())
+    wf_stats = model.get("wf_stats", {})
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**Walk-forward alpha (top vs bottom score bucket, 20d fwd return):** {fmt_num(wf_stats.get('alpha', np.nan), 3)}")
+        st.markdown(f"**Walk-forward positive hit rate (top score bucket):** {fmt_num(100*safe_float(wf_stats.get('hit_rate', np.nan)), 1)}%")
+        if model["cluster_artifacts"]:
+            st.markdown(f"**Cluster silhouette:** {fmt_num(model['cluster_artifacts'].silhouette, 3)}")
+            st.markdown(f"**Cluster stability:** {fmt_num(model['cluster_artifacts'].stability, 3)}")
+    with c2:
+        st.markdown("**Available exports**")
+        st.download_button("Download sweet spots JSON", data=json.dumps(model["sweet_spots"], indent=2), file_name="sweet_spots.json", mime="application/json")
+        st.download_button("Download cluster stats CSV", data=model["cluster_stats"].to_csv(index=False), file_name="cluster_stats.csv", mime="text/csv")
+        if not wf_df.empty:
+            st.download_button("Download walk-forward CSV", data=wf_df.to_csv(index=False), file_name="walkforward.csv", mime="text/csv")
+    if not wf_df.empty:
+        st.line_chart(wf_df.set_index("date")[["wf_score", "ret_20"]].tail(250), height=260)
+
+if show_debug:
+    st.markdown("---")
+    st.write("Latest snapshot", latest_snap)
+    st.write("Previous snapshot", prev_snap)
+    st.write("Weekly snapshot", weekly_snap)
