@@ -2,920 +2,751 @@
 import io
 import json
 import math
-import re
 import zipfile
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# -----------------------------
-# Page / paths
-# -----------------------------
-st.set_page_config(page_title="Breadth Historical Gate Engine", layout="wide", page_icon="📈")
+# =============================
+# Config / constants
+# =============================
+st.set_page_config(page_title="Breadth Historical Gate Engine Pro", layout="wide", page_icon="📈")
 
-APP_DIR = Path("breadth_gate_store")
+APP_DIR = Path("gate_model_store")
 APP_DIR.mkdir(exist_ok=True)
+MODEL_JSON = APP_DIR / "learned_gate_model.json"
+DAILY_HIST_PARQUET = APP_DIR / "daily_history.parquet"
+WEEKLY_HIST_PARQUET = APP_DIR / "weekly_history.parquet"
+UPLOAD_HISTORY_CSV = APP_DIR / "snapshot_upload_history.csv"
 
-DAILY_BASELINE_PATH = APP_DIR / "daily_baseline.parquet"
-WEEKLY_BASELINE_PATH = APP_DIR / "weekly_baseline.parquet"
-DAILY_FEATURES_PATH = APP_DIR / "daily_features.parquet"
-WEEKLY_FEATURES_PATH = APP_DIR / "weekly_features.parquet"
-MODEL_PATH = APP_DIR / "learned_model.json"
-UPLOAD_HISTORY_PATH = APP_DIR / "upload_history.csv"
-SNAPSHOT_DIR = APP_DIR / "snapshots"
-SNAPSHOT_DIR.mkdir(exist_ok=True)
+PRIMARY_FEATURES = [
+    "$BPSPX", "$BPNYA", "$SPXA50R", "$OEXA50R", "$OEXA150R", "$OEXA200R",
+    "$NYMO", "$NYSI", "$NYAD", "$SPXADP", "$NYHL", "$TRIN", "$CPCE", "$VIX", "VXX",
+    "RSP", "SPY", "URSP", "RSP_SPY", "SMH_SPY", "IWM_SPY", "XLF_SPY", "HYG_IEF", "SPXS_SVOL"
+]
+TREND_FEATURE_BASES = [
+    "$BPSPX", "$BPNYA", "$SPXA50R", "$OEXA200R", "$NYMO", "$NYSI", "$NYHL", "$TRIN", "$CPCE", "$VIX", "VXX",
+    "RSP_SPY", "SMH_SPY", "IWM_SPY", "XLF_SPY", "HYG_IEF", "SPXS_SVOL"
+]
+TREND_WINDOWS = [1, 2, 3, 5, 10]
+MIN_GATE_SUPPORT = 40
+TOP_SINGLE_PER_OUTCOME = 10
+MAX_COMBO_CANDIDATES = 8
 
-# -----------------------------
-# Styling
-# -----------------------------
+OUTCOME_SPECS = {
+    "bounce": {"max_days": 10, "good_up": 0.03, "bad_down": -0.03},
+    "repair": {"max_days": 20, "good_up": 0.04, "bad_down": -0.05},
+    "regime": {"max_days": 60, "good_up": 0.08, "bad_down": -0.08, "confirm_days": 20, "confirm_up": 0.03},
+    "fall": {"max_days": 10, "good_down": -0.03, "bad_up": 0.03},
+}
+
+SYMBOL_MAP = {
+    "_BPSPX": "$BPSPX", "_BPNYA": "$BPNYA", "_SPXA50R": "$SPXA50R", "_OEXA50R": "$OEXA50R",
+    "_OEXA150R": "$OEXA150R", "_OEXA200R": "$OEXA200R", "_NYMO": "$NYMO", "_NYSI": "$NYSI",
+    "_NYAD": "$NYAD", "_SPXADP": "$SPXADP", "_NYHL": "$NYHL", "_TRIN": "$TRIN", "_CPCE": "$CPCE",
+    "_VIX": "$VIX", "_SPX": "$SPX", "RSP": "RSP", "SPY": "SPY", "URSP": "URSP", "VXX": "VXX",
+    "RSP_SPY": "RSP_SPY", "SMH_SPY": "SMH_SPY", "IWM_SPY": "IWM_SPY", "XLF_SPY": "XLF_SPY",
+    "HYG_IEF": "HYG_IEF", "SPXS_SVOL": "SPXS_SVOL"
+}
+
 CUSTOM_CSS = """
 <style>
-:root{
-  --bg:#0b1020;
-  --panel:#111936;
-  --panel2:#162246;
-  --text:#eaf0ff;
-  --muted:#95a8d8;
-  --green:#22c55e;
-  --yellow:#f59e0b;
-  --red:#ef4444;
-  --blue:#38bdf8;
-  --purple:#a78bfa;
-}
-.block-container{padding-top:1rem;padding-bottom:2rem;}
-.soft-card{
-  background:linear-gradient(180deg, rgba(17,25,54,.97), rgba(10,17,38,.99));
-  border:1px solid rgba(148,163,184,.24);
-  border-radius:18px;
-  padding:1rem 1rem .95rem 1rem;
-  box-shadow:0 10px 35px rgba(0,0,0,.22);
-}
-.main-title{
-  padding:1rem 1.25rem;
-  border-radius:18px;
-  background:linear-gradient(135deg, rgba(56,189,248,.16), rgba(167,139,250,.16));
-  border:1px solid rgba(148,163,184,.20);
-  margin-bottom:1rem;
-}
-.metric-big{
-  font-size:3rem;font-weight:950;line-height:1.0;color:white;margin:.15rem 0 .25rem 0;
-}
-.metric-label{
-  color:#bcd0ff;font-size:1rem;font-weight:800;letter-spacing:.02em;
-}
-.pill{
-  display:inline-block;padding:.3rem .6rem;border-radius:999px;font-size:.82rem;font-weight:800;
-  border:1px solid rgba(255,255,255,.12);margin-right:.35rem;
-}
-.pill-green{background:rgba(34,197,94,.16); color:#bbf7d0;}
-.pill-yellow{background:rgba(245,158,11,.16); color:#fde68a;}
-.pill-red{background:rgba(239,68,68,.16); color:#fecaca;}
-.pill-blue{background:rgba(56,189,248,.16); color:#bae6fd;}
-.action-box{
-  border-radius:16px;padding:.85rem 1rem;margin:.45rem 0;border:1px solid rgba(255,255,255,.10);
-}
-.action-long{background:rgba(34,197,94,.12);}
-.action-short{background:rgba(239,68,68,.12);}
-.action-hold{background:rgba(245,158,11,.12);}
-.small-muted{color:#93a4cc;font-size:.88rem;}
+.block-container {padding-top:1rem; padding-bottom:2rem;}
+.card {background: linear-gradient(180deg,#111a36,#0b1227); border:1px solid rgba(148,163,184,.22); border-radius:16px; padding:1rem; margin-bottom:1rem;}
+.metric {background: rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:.9rem;}
+.signal-long {background:rgba(34,197,94,.14); border:1px solid rgba(34,197,94,.32); border-radius:16px; padding:1rem;}
+.signal-short {background:rgba(239,68,68,.14); border:1px solid rgba(239,68,68,.32); border-radius:16px; padding:1rem;}
+.signal-hold {background:rgba(245,158,11,.14); border:1px solid rgba(245,158,11,.32); border-radius:16px; padding:1rem;}
+.smallmuted {color:#94a3b8; font-size:.9rem;}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-st.markdown("""
-<div class="main-title">
-  <div style="font-size:1.55rem;font-weight:900;">📈 Breadth Historical Gate Engine</div>
-  <div class="small-muted">Hard bounce / repair / regime / fall gates learned from your uploaded StockCharts history. One-time historical upload, then daily snapshot verdicts: LONG / SHORT / HOLD.</div>
-</div>
-""", unsafe_allow_html=True)
 
-# -----------------------------
-# Constants
-# -----------------------------
-FEATURE_LEVELS = ["close", "pct_b20", "rsi14", "cci20", "roc3", "slope3"]
-FORWARD_DEFS = {
-    "bounce": {"horizon": 10, "up": 0.03, "dd_floor": -0.03},
-    "repair": {"horizon": 20, "ret": 0.04, "dd_floor": -0.05},
-    "regime": {"horizon": 60, "ret": 0.08, "h20": 0.03, "dd_floor": -0.08},
-    "fall": {"horizon": 10, "down": -0.03, "up_cap": 0.02},
-}
-STATE_COLORS = {"LONG": "green", "SHORT": "red", "HOLD": "yellow"}
-SNAPSHOT_SYMBOL_MAP = {
-    "$BPSPX":"$BPSPX", "$BPNYA":"$BPNYA", "$OEXA50R":"$OEXA50R", "$OEXA150R":"$OEXA150R", "$OEXA200R":"$OEXA200R",
-    "$SPXA50R":"$SPXA50R", "$NYMO":"$NYMO", "$NYSI":"$NYSI", "$NYAD":"$NYAD", "$NYHL":"$NYHL",
-    "$SPXADP":"$SPXADP", "$CPCE":"$CPCE", "$CPC":"$CPC", "$TRIN":"$TRIN", "$VIX":"VIX",
-    "VXX":"VXX", "RSP":"RSP", "URSP":"URSP", "$SPX":"$SPX", "SPY":"SPY",
-    "RSP:SPY":"RSP_SPY", "SMH:SPY":"SMH_SPY", "IWM:SPY":"IWM_SPY", "XLF:SPY":"XLF_SPY",
-    "HYG:IEF":"HYG_IEF", "SPXS:SVOL":"SPXS_SVOL"
-}
-PRIMARY_DAILY_FEATURES = [
-    "$BPSPX__pct_b20", "$BPSPX__close", "$BPNYA__close", "$OEXA200R__close", "$SPXA50R__close",
-    "$NYMO__close", "$NYSI__close", "$NYAD__close", "$NYHL__close", "$SPXADP__close",
-    "$CPCE__close", "$TRIN__close", "VIX__close", "VXX__close", "RSP_SPY__close",
-    "SMH_SPY__close", "IWM_SPY__close", "XLF_SPY__close", "HYG_IEF__close", "SPXS_SVOL__close",
-    "$BPSPX__cci20", "$SPXA50R__roc3", "$NYHL__slope3"
-]
-PRIMARY_WEEKLY_FEATURES = [
-    "$NYSI__close", "$OEXA200R__close", "$SPXA50R__close", "$BPSPX__close", "$BPNYA__close",
-    "$NYHL__close", "RSP_SPY__close", "SMH_SPY__close", "IWM_SPY__close"
-]
-
-# -----------------------------
-# Helpers
-# -----------------------------
+# =============================
+# Utility functions
+# =============================
 def safe_float(x):
     try:
         return float(x)
     except Exception:
         return np.nan
 
-def fmt_num(x, digits=2):
-    if pd.isna(x):
-        return "n/a"
-    return f"{float(x):.{digits}f}"
+def pct_b(s: pd.Series, window: int = 20, stds: float = 2.0) -> pd.Series:
+    ma = s.rolling(window).mean()
+    sd = s.rolling(window).std()
+    upper = ma + stds * sd
+    lower = ma - stds * sd
+    return (s - lower) / (upper - lower).replace(0, np.nan)
 
-def color_pill(signal: str) -> str:
-    cls = {"LONG":"pill-green", "SHORT":"pill-red", "HOLD":"pill-yellow"}.get(signal, "pill-blue")
-    return f'<span class="pill {cls}">{signal}</span>'
+def rsi(s: pd.Series, period: int = 14) -> pd.Series:
+    d = s.diff()
+    up = d.clip(lower=0)
+    dn = -d.clip(upper=0)
+    ma_up = up.ewm(alpha=1 / period, adjust=False).mean()
+    ma_dn = dn.ewm(alpha=1 / period, adjust=False).mean()
+    rs = ma_up / ma_dn.replace(0, np.nan)
+    return (100 - (100 / (1 + rs))).fillna(50)
 
-def save_json(path: Path, data: dict):
-    path.write_text(json.dumps(data, indent=2))
-
-def load_json(path: Path, default):
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return default
-
-def ensure_upload_history():
-    if not UPLOAD_HISTORY_PATH.exists():
-        pd.DataFrame(columns=["upload_ts", "snapshot_file", "verdict", "bounce_prob", "repair_prob", "regime_prob", "fall_prob"]).to_csv(UPLOAD_HISTORY_PATH, index=False)
-
-def append_upload_history(row: Dict):
-    ensure_upload_history()
-    hist = pd.read_csv(UPLOAD_HISTORY_PATH)
-    hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
-    hist.to_csv(UPLOAD_HISTORY_PATH, index=False)
-
-def load_upload_history() -> pd.DataFrame:
-    ensure_upload_history()
-    try:
-        return pd.read_csv(UPLOAD_HISTORY_PATH)
-    except Exception:
-        return pd.DataFrame()
-
-def save_snapshot_file(df: pd.DataFrame) -> Path:
-    path = SNAPSHOT_DIR / f"snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    df.to_csv(path, index=False)
-    return path
+def cci_from_close(s: pd.Series, period: int = 20) -> pd.Series:
+    sma = s.rolling(period).mean()
+    mad = s.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    return (s - sma) / (0.015 * mad.replace(0, np.nan))
 
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    ma_up = up.ewm(alpha=1 / period, adjust=False).mean()
-    ma_down = down.ewm(alpha=1 / period, adjust=False).mean()
-    rs = ma_up / ma_down.replace(0, np.nan)
-    return (100 - 100 / (1 + rs)).fillna(50)
+def compute_proxy_nymo(nyad: pd.Series, spxadp: pd.Series) -> pd.Series:
+    raw = 0.6 * nyad.fillna(0) + 0.4 * spxadp.fillna(0)
+    return 100.0 * np.tanh(raw / 1600.0)
 
-def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
-    tp = (high + low + close) / 3.0
-    sma = tp.rolling(period).mean()
-    mad = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    return (tp - sma) / (0.015 * mad.replace(0, np.nan))
+def compute_proxy_nysi(proxy_nymo: pd.Series) -> pd.Series:
+    # slow cumulative breadth proxy
+    return ema(proxy_nymo.fillna(0), 5).rolling(10, min_periods=1).sum()
 
-def percent_b(series: pd.Series, window: int = 20, num_std: float = 2.0) -> pd.Series:
-    ma = series.rolling(window).mean()
-    std = series.rolling(window).std()
-    upper = ma + num_std * std
-    lower = ma - num_std * std
-    denom = (upper - lower).replace(0, np.nan)
-    return (series - lower) / denom
+def normalize_name(name: str) -> Tuple[str, str]:
+    stem = Path(name).stem.strip()
+    timeframe = "weekly" if stem.lower().endswith(" w") else "daily"
+    stem = stem[:-2].strip() if timeframe == "weekly" else stem
+    key = stem.replace(" ", "").replace("-", "_")
+    if key.startswith("_"):
+        key = key.upper()
+    else:
+        key = key.upper()
+    return SYMBOL_MAP.get(key, key), timeframe
 
-def roc(series: pd.Series, period: int = 3) -> pd.Series:
-    return 100 * (series / series.shift(period) - 1)
+def append_upload_history(row: Dict):
+    if UPLOAD_HISTORY_CSV.exists():
+        hist = pd.read_csv(UPLOAD_HISTORY_CSV)
+    else:
+        hist = pd.DataFrame()
+    hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
+    hist.to_csv(UPLOAD_HISTORY_CSV, index=False)
 
-def slope_n(series: pd.Series, n: int = 3) -> pd.Series:
-    return series - series.shift(n)
-
-def compute_proxy_nymo(snapshot: Dict[str, float], prev_snapshot: Dict[str, float]) -> Dict[str, float]:
-    nyad = safe_float(snapshot.get("$NYAD__close", np.nan))
-    spxadp = safe_float(snapshot.get("$SPXADP__close", np.nan))
-    prev_nyad = safe_float(prev_snapshot.get("$NYAD__close", np.nan))
-    prev_spxadp = safe_float(prev_snapshot.get("$SPXADP__close", np.nan))
-    cur_raw = 0.6 * (0 if pd.isna(nyad) else nyad) + 0.4 * (0 if pd.isna(spxadp) else spxadp)
-    prev_raw = 0.6 * (0 if pd.isna(prev_nyad) else prev_nyad) + 0.4 * (0 if pd.isna(prev_spxadp) else prev_spxadp)
-    val = 100 * np.tanh(cur_raw / 1600.0)
-    prev_val = 100 * np.tanh(prev_raw / 1600.0)
-    delta = val - prev_val
-    return {"proxy_nymo": val, "proxy_delta": delta, "proxy_raw": cur_raw}
-
-def compute_proxy_nysi(snapshot: Dict[str, float], prev_snapshot: Dict[str, float]) -> Dict[str, float]:
-    proxy = compute_proxy_nymo(snapshot, prev_snapshot)
-    official_prev = safe_float(prev_snapshot.get("$NYSI__close", np.nan))
-    if pd.isna(official_prev):
-        official_prev = safe_float(snapshot.get("$NYSI__close", np.nan))
-    val = official_prev + (proxy["proxy_nymo"] / 12.0)
-    prev_val = official_prev + ((proxy["proxy_nymo"] - proxy["proxy_delta"]) / 12.0)
-    return {"proxy_nysi": val, "proxy_delta": val - prev_val}
-
-# -----------------------------
+# =============================
 # Parsing
-# -----------------------------
-@st.cache_data(show_spinner=False)
+# =============================
+def parse_stockcharts_csv(content: bytes, member_name: str) -> pd.DataFrame:
+    text = content.decode("utf-8", errors="ignore").splitlines()
+    if len(text) < 3:
+        raise ValueError(f"{member_name}: not enough lines")
+    symbol, timeframe = normalize_name(member_name)
+    rows = []
+    for line in text[2:]:
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 6:
+            continue
+        dt = pd.to_datetime(parts[0], errors="coerce")
+        if pd.isna(dt):
+            continue
+        rows.append({
+            "date": dt,
+            "symbol": symbol,
+            "open": safe_float(parts[1]),
+            "high": safe_float(parts[2]),
+            "low": safe_float(parts[3]),
+            "close": safe_float(parts[4]),
+            "volume": safe_float(parts[5]),
+            "timeframe": timeframe,
+        })
+    return pd.DataFrame(rows)
+
 def parse_stockcharts_zip(file_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    daily_records, weekly_records = [], []
+    daily_frames, weekly_frames = [], []
     with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-        csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        for name in csv_names:
-            raw = zf.read(name).decode("utf-8", errors="ignore").splitlines()
-            if len(raw) < 3:
+        for name in zf.namelist():
+            if not name.lower().endswith(".csv"):
                 continue
-            first = raw[0].strip()
-            sym = first.split(",")[0].strip()
-            if sym == "":
+            try:
+                df = parse_stockcharts_csv(zf.read(name), name)
+            except Exception:
                 continue
-            if sym.lower().startswith("stockcharts/"):
-                sym = Path(sym).name
-            timeframe = "weekly" if " w.csv" in name.lower() else "daily"
-            rows = []
-            for line in raw[2:]:
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) < 6:
-                    continue
-                dt = pd.to_datetime(parts[0], format="%m/%d/%Y", errors="coerce")
-                if pd.isna(dt):
-                    continue
-                rows.append({
-                    "date": dt, "symbol": sym, "open": safe_float(parts[1]), "high": safe_float(parts[2]),
-                    "low": safe_float(parts[3]), "close": safe_float(parts[4]), "volume": safe_float(parts[5])
-                })
-            if not rows:
+            if df.empty:
                 continue
-            if timeframe == "daily":
-                daily_records.extend(rows)
+            if df["timeframe"].iloc[0] == "weekly":
+                weekly_frames.append(df)
             else:
-                weekly_records.extend(rows)
-    daily = pd.DataFrame(daily_records).sort_values(["symbol", "date"]).reset_index(drop=True)
-    weekly = pd.DataFrame(weekly_records).sort_values(["symbol", "date"]).reset_index(drop=True)
-    if daily.empty:
-        raise ValueError("Could not parse any daily CSV files from the historical zip.")
+                daily_frames.append(df)
+    if not daily_frames:
+        raise ValueError("No daily CSV files were parsed from the ZIP.")
+    daily = pd.concat(daily_frames, ignore_index=True).sort_values(["symbol", "date"])
+    weekly = pd.concat(weekly_frames, ignore_index=True).sort_values(["symbol", "date"]) if weekly_frames else pd.DataFrame()
     return daily, weekly
 
-@st.cache_data(show_spinner=False)
-def parse_realtime_snapshot(file_bytes: bytes) -> pd.DataFrame:
+def parse_snapshot_csv(file_bytes: bytes) -> pd.DataFrame:
     df = pd.read_csv(io.BytesIO(file_bytes))
     if "Symbol" not in df.columns:
-        raise ValueError("Snapshot file must contain a 'Symbol' column.")
-    out = df.copy()
-    out["Symbol"] = out["Symbol"].astype(str).str.strip()
-    close_col = None
-    for c in ["Close", "Last", "Price", "Current", "Value"]:
-        if c in out.columns:
-            close_col = c
-            break
+        raise ValueError("Snapshot CSV must contain a 'Symbol' column.")
+    df["Symbol"] = df["Symbol"].astype(str).str.strip().str.upper()
+    close_col = "Close" if "Close" in df.columns else next((c for c in df.columns if "close" in c.lower()), None)
     if close_col is None:
-        raise ValueError("Snapshot file must contain a close-like column such as 'Close'.")
-    out["Close"] = pd.to_numeric(out[close_col], errors="coerce")
-    pct_col = None
-    for c in ["Daily PctChange", "Daily PctChange(1,Close)", "Daily PctChange(1,Daily Close)", "% Change", "PctChange", "Pct Change"]:
-        if c in out.columns:
-            pct_col = c
-            break
-    out["PctChange"] = pd.to_numeric(out[pct_col], errors="coerce") if pct_col else np.nan
-    out = out[["Symbol", "Close", "PctChange"]].dropna(subset=["Close"])
-    if out.empty:
-        raise ValueError("Snapshot file parsed successfully, but no valid close values were found.")
-    return out
-
-# -----------------------------
-# Feature engineering
-# -----------------------------
-@st.cache_data(show_spinner=False)
-def add_indicator_features(hist: pd.DataFrame) -> pd.DataFrame:
-    frames = []
-    for sym, g in hist.groupby("symbol", sort=False):
-        g = g.sort_values("date").copy()
-        g["rsi14"] = rsi(g["close"], 14)
-        g["cci20"] = cci(g["high"], g["low"], g["close"], 20)
-        g["pct_b20"] = percent_b(g["close"], 20, 2.0)
-        g["roc3"] = roc(g["close"], 3)
-        g["slope3"] = slope_n(g["close"], 3)
-        frames.append(g)
-    return pd.concat(frames, ignore_index=True)
-
-def features_wide(hist_feat: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
-    pieces = []
-    for feat in feature_list:
-        p = hist_feat.pivot(index="date", columns="symbol", values=feat)
-        p.columns = [f"{c}__{feat}" for c in p.columns]
-        pieces.append(p)
-    wide = pd.concat(pieces, axis=1).sort_index()
-    return wide
-
-def recompute_latest_indicators_from_snapshot(hist_feat: pd.DataFrame, snapshot_df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
-    rt_map = {str(r["Symbol"]).strip(): safe_float(r["Close"]) for _, r in snapshot_df.iterrows()}
-    results = {}
-    for snap_sym, close_val in rt_map.items():
-        mapped = SNAPSHOT_SYMBOL_MAP.get(snap_sym, snap_sym)
-        g = hist_feat[hist_feat["symbol"] == mapped].sort_values("date").copy()
-        if g.empty:
-            continue
-        g.iloc[-1, g.columns.get_loc("close")] = close_val
-        if len(g) > 1:
-            g.iloc[-1, g.columns.get_loc("open")] = g.iloc[-2]["close"]
-        g.iloc[-1, g.columns.get_loc("high")] = max(g.iloc[-1]["high"], close_val)
-        g.iloc[-1, g.columns.get_loc("low")] = min(g.iloc[-1]["low"], close_val)
-        g["rsi14"] = rsi(g["close"], 14)
-        g["cci20"] = cci(g["high"], g["low"], g["close"], 20)
-        g["pct_b20"] = percent_b(g["close"], 20, 2.0)
-        g["roc3"] = roc(g["close"], 3)
-        g["slope3"] = slope_n(g["close"], 3)
-        last = g.iloc[-1]
-        results[mapped] = {
-            "close": safe_float(last["close"]), "pct_b20": safe_float(last["pct_b20"]), "rsi14": safe_float(last["rsi14"]),
-            "cci20": safe_float(last["cci20"]), "roc3": safe_float(last["roc3"]), "slope3": safe_float(last["slope3"])
-        }
-    return results
-
-def latest_snapshot_dict(hist_feat: pd.DataFrame) -> Dict[str, float]:
-    snapshot = {}
-    for sym, g in hist_feat.groupby("symbol", sort=False):
-        row = g.sort_values("date").iloc[-1]
-        for feat in FEATURE_LEVELS:
-            snapshot[f"{sym}__{feat}"] = safe_float(row.get(feat))
-    return snapshot
-
-def prior_snapshot_dict(hist_feat: pd.DataFrame) -> Dict[str, float]:
-    snapshot = {}
-    for sym, g in hist_feat.groupby("symbol", sort=False):
-        g = g.sort_values("date")
-        if len(g) < 2:
-            continue
-        row = g.iloc[-2]
-        for feat in FEATURE_LEVELS:
-            snapshot[f"{sym}__{feat}"] = safe_float(row.get(feat))
-    return snapshot
-
-# -----------------------------
-# Forward outcomes / gate learning
-# -----------------------------
-def build_forward_outcomes(daily_feat: pd.DataFrame) -> pd.DataFrame:
-    rsp = daily_feat[daily_feat["symbol"] == "RSP"].sort_values("date").copy()
-    if rsp.empty:
-        raise ValueError("Historical zip must contain RSP daily history.")
-    close = rsp["close"].astype(float)
-    idx = rsp["date"].values
-
-    def max_gain(window):
-        return np.nanmax(window / window[0] - 1.0) if len(window) else np.nan
-
-    def max_drawdown(window):
-        return np.nanmin(window / window[0] - 1.0) if len(window) else np.nan
-
-    def fwd_ret(window):
-        return (window[-1] / window[0] - 1.0) if len(window) else np.nan
-
-    h10_max = close.rolling(FORWARD_DEFS["bounce"]["horizon"] + 1).apply(max_gain, raw=True).shift(-FORWARD_DEFS["bounce"]["horizon"])
-    h10_dd = close.rolling(FORWARD_DEFS["bounce"]["horizon"] + 1).apply(max_drawdown, raw=True).shift(-FORWARD_DEFS["bounce"]["horizon"])
-    h20_ret = close.rolling(FORWARD_DEFS["repair"]["horizon"] + 1).apply(fwd_ret, raw=True).shift(-FORWARD_DEFS["repair"]["horizon"])
-    h20_dd = close.rolling(FORWARD_DEFS["repair"]["horizon"] + 1).apply(max_drawdown, raw=True).shift(-FORWARD_DEFS["repair"]["horizon"])
-    h60_ret = close.rolling(FORWARD_DEFS["regime"]["horizon"] + 1).apply(fwd_ret, raw=True).shift(-FORWARD_DEFS["regime"]["horizon"])
-    h60_dd = close.rolling(FORWARD_DEFS["regime"]["horizon"] + 1).apply(max_drawdown, raw=True).shift(-FORWARD_DEFS["regime"]["horizon"])
-    h20_recheck = close.rolling(21).apply(fwd_ret, raw=True).shift(-20)
-    h10_min = close.rolling(FORWARD_DEFS["fall"]["horizon"] + 1).apply(max_drawdown, raw=True).shift(-FORWARD_DEFS["fall"]["horizon"])
-    h10_up = close.rolling(FORWARD_DEFS["fall"]["horizon"] + 1).apply(max_gain, raw=True).shift(-FORWARD_DEFS["fall"]["horizon"])
-
+        raise ValueError("Snapshot CSV must contain a close-like column.")
+    pct_col = next((c for c in df.columns if "pctchange" in c.lower() or "change" in c.lower()), None)
     out = pd.DataFrame({
-        "date": rsp["date"].values,
-        "bounce": (h10_max >= FORWARD_DEFS["bounce"]["up"]) & (h10_dd >= FORWARD_DEFS["bounce"]["dd_floor"]),
-        "repair": (h20_ret >= FORWARD_DEFS["repair"]["ret"]) & (h20_dd >= FORWARD_DEFS["repair"]["dd_floor"]),
-        "regime": (h60_ret >= FORWARD_DEFS["regime"]["ret"]) & (h20_recheck >= FORWARD_DEFS["regime"]["h20"]) & (h60_dd >= FORWARD_DEFS["regime"]["dd_floor"]),
-        "fall": (h10_min <= FORWARD_DEFS["fall"]["down"]) & (h10_up <= FORWARD_DEFS["fall"]["up_cap"]),
-        "fwd10_max": h10_max,
-        "fwd20_ret": h20_ret,
-        "fwd60_ret": h60_ret
-    }).dropna()
+        "symbol": df["Symbol"],
+        "close": pd.to_numeric(df[close_col], errors="coerce"),
+        "pct_change": pd.to_numeric(df[pct_col], errors="coerce") if pct_col else np.nan,
+    })
+    return out.dropna(subset=["close"])
+
+# =============================
+# Feature engineering
+# =============================
+def pivot_close(hist: pd.DataFrame) -> pd.DataFrame:
+    return hist.pivot(index="date", columns="symbol", values="close").sort_index()
+
+def build_level_and_trend_features(close_df: pd.DataFrame) -> pd.DataFrame:
+    feats = pd.DataFrame(index=close_df.index)
+    for sym in close_df.columns:
+        s = close_df[sym].astype(float)
+        feats[sym] = s
+        feats[f"{sym}__BBP"] = pct_b(s)
+        feats[f"{sym}__RSI14"] = rsi(s, 14)
+        feats[f"{sym}__CCI20"] = cci_from_close(s, 20)
+        for w in TREND_WINDOWS:
+            feats[f"{sym}__D{w}"] = s.diff(w)
+            feats[f"{sym}__ROC{w}"] = 100.0 * (s / s.shift(w) - 1.0)
+        feats[f"{sym}__BBP_D3"] = feats[f"{sym}__BBP"].diff(3)
+        feats[f"{sym}__RSI14_D3"] = feats[f"{sym}__RSI14"].diff(3)
+        feats[f"{sym}__CCI20_D3"] = feats[f"{sym}__CCI20"].diff(3)
+    if "$NYAD" in close_df.columns and "$SPXADP" in close_df.columns:
+        feats["NYMO_PROXY"] = compute_proxy_nymo(close_df["$NYAD"], close_df["$SPXADP"])
+        feats["NYSI_PROXY"] = compute_proxy_nysi(feats["NYMO_PROXY"])
+        for w in TREND_WINDOWS:
+            feats[f"NYMO_PROXY__D{w}"] = feats["NYMO_PROXY"].diff(w)
+            feats[f"NYSI_PROXY__D{w}"] = feats["NYSI_PROXY"].diff(w)
+    return feats
+
+def add_forward_outcomes(close_df: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
+    rsp = close_df["RSP"].dropna().copy()
+    aligned = feats.loc[rsp.index].copy()
+    for name, spec in OUTCOME_SPECS.items():
+        h = spec["max_days"]
+        fwd = pd.concat({i: rsp.shift(-i) / rsp - 1.0 for i in range(1, h + 1)}, axis=1)
+        fwd_max = fwd.max(axis=1)
+        fwd_min = fwd.min(axis=1)
+        if name == "bounce":
+            aligned[name] = (fwd_max >= spec["good_up"]) & (fwd_min >= spec["bad_down"])
+        elif name == "repair":
+            aligned[name] = (fwd.iloc[:, -1] >= spec["good_up"]) & (fwd_min >= spec["bad_down"])
+        elif name == "regime":
+            confirm = rsp.shift(-spec["confirm_days"]) / rsp - 1.0
+            aligned[name] = (fwd.iloc[:, -1] >= spec["good_up"]) & (confirm >= spec["confirm_up"]) & (fwd_min >= spec["bad_down"])
+        elif name == "fall":
+            aligned[name] = (fwd_min <= spec["good_down"]) & (fwd_max <= spec["bad_up"])
+    return aligned
+
+def build_weekly_overlay(weekly_hist: pd.DataFrame) -> Dict:
+    if weekly_hist.empty:
+        return {"available": False}
+    wclose = pivot_close(weekly_hist)
+    wfeat = build_level_and_trend_features(wclose)
+    latest = wfeat.iloc[-1].dropna()
+    checks = {}
+    for key in ["$NYSI", "$OEXA200R", "$SPXA50R", "$NYHL", "$BPSPX", "$BPNYA"]:
+        if key in latest.index:
+            if key in ["$NYSI", "$NYHL"]:
+                checks[key] = latest[key] > latest.get(f"{key}__D3", np.nan)
+            else:
+                checks[key] = latest[key] > wfeat[key].quantile(0.45)
+    pass_fraction = float(np.mean(list(checks.values()))) if checks else np.nan
+    return {
+        "available": True,
+        "pass_fraction": pass_fraction,
+        "checks": checks,
+        "latest_date": str(wfeat.index.max().date()),
+    }
+
+# =============================
+# Gate learning
+# =============================
+@dataclass
+class Gate:
+    outcome: str
+    kind: str
+    description: str
+    conditions: List[Dict]
+    support: int
+    base_rate: float
+    hit_rate: float
+    lift: float
+    score: float
+
+def eval_condition(series: pd.Series, cond: Dict) -> pd.Series:
+    op = cond["op"]
+    thr = cond["thr"]
+    if op == ">=":
+        return series >= thr
+    return series <= thr
+
+def score_gate(pass_mask: pd.Series, outcome: pd.Series) -> Optional[Tuple[int, float, float, float]]:
+    valid = pass_mask.notna() & outcome.notna()
+    if valid.sum() < MIN_GATE_SUPPORT:
+        return None
+    passed = pass_mask[valid]
+    support = int(passed.sum())
+    if support < MIN_GATE_SUPPORT:
+        return None
+    hit_rate = float(outcome[valid & passed].mean())
+    base_rate = float(outcome[valid].mean())
+    if math.isnan(hit_rate) or math.isnan(base_rate) or base_rate <= 0:
+        return None
+    lift = hit_rate / base_rate
+    return support, base_rate, hit_rate, lift
+
+def choose_candidate_thresholds(series: pd.Series) -> List[float]:
+    vals = series.dropna()
+    if vals.nunique() < 12:
+        return sorted(vals.unique().tolist())
+    qs = np.linspace(0.15, 0.85, 8)
+    return sorted(set(float(vals.quantile(q)) for q in qs))
+
+def learn_single_feature_gates(df: pd.DataFrame, feature_cols: List[str]) -> Dict[str, List[Gate]]:
+    out = {k: [] for k in OUTCOME_SPECS.keys()}
+    for outcome in OUTCOME_SPECS.keys():
+        y = df[outcome].astype(bool)
+        for feat in feature_cols:
+            s = pd.to_numeric(df[feat], errors="coerce")
+            if s.notna().sum() < MIN_GATE_SUPPORT * 2:
+                continue
+            thresholds = choose_candidate_thresholds(s)
+            best: Optional[Gate] = None
+            for thr in thresholds:
+                for op in (">=", "<="):
+                    pmask = eval_condition(s, {"op": op, "thr": thr})
+                    scored = score_gate(pmask, y)
+                    if not scored:
+                        continue
+                    support, base_rate, hit_rate, lift = scored
+                    # prefer higher lift, but require decent hit rate lift and not vanishing support
+                    score = (lift - 1.0) * np.sqrt(support)
+                    gate = Gate(
+                        outcome=outcome,
+                        kind="single",
+                        description=f"{feat} {op} {thr:.3f}",
+                        conditions=[{"feature": feat, "op": op, "thr": float(thr)}],
+                        support=support,
+                        base_rate=base_rate,
+                        hit_rate=hit_rate,
+                        lift=lift,
+                        score=score,
+                    )
+                    if (best is None) or (gate.score > best.score):
+                        best = gate
+            if best:
+                out[outcome].append(best)
+        out[outcome] = sorted(out[outcome], key=lambda g: g.score, reverse=True)[:TOP_SINGLE_PER_OUTCOME]
     return out
 
-def pick_feature_columns(wide: pd.DataFrame, candidates: List[str]) -> List[str]:
-    return [c for c in candidates if c in wide.columns]
-
-def gate_direction_hint(feature: str, state: str) -> List[str]:
-    # bias search toward sensible directions but still test both if ambiguous
-    lower_feats = ["pct_b20", "cci20"]
-    panic_high_feats = ["$TRIN__close", "$CPCE__close", "VIX__close", "VXX__close", "SPXS_SVOL__close"]
-    positive_feats = ["$SPXA50R__close", "$BPSPX__close", "$BPNYA__close", "$OEXA200R__close", "$NYMO__close", "$NYSI__close", "$NYHL__close", "$NYAD__close", "$SPXADP__close", "RSP_SPY__close", "SMH_SPY__close", "IWM_SPY__close", "XLF_SPY__close", "HYG_IEF__close"]
-    if state == "bounce":
-        if any(x in feature for x in lower_feats):
-            return ["gte", "lte"]
-        if feature in panic_high_feats:
-            return ["gte", "lte"]
-        if feature in positive_feats:
-            return ["lte", "gte"]
-    if state in {"repair", "regime"}:
-        return ["gte", "lte"]
-    if state == "fall":
-        if feature in panic_high_feats:
-            return ["gte", "lte"]
-        return ["lte", "gte"]
-    return ["gte", "lte"]
-
-def learn_single_gates(train_df: pd.DataFrame, feature_cols: List[str], state: str, min_support: int = 30) -> List[dict]:
-    y = train_df[state].astype(int)
-    base = float(y.mean()) if len(y) else np.nan
-    gates = []
-    for col in feature_cols:
-        s = pd.to_numeric(train_df[col], errors="coerce")
-        valid = s.notna() & y.notna()
-        sv = s[valid]
-        yv = y[valid]
-        if len(sv) < max(min_support * 2, 80):
-            continue
-        q_vals = sorted(set([round(x, 6) for x in sv.quantile(np.linspace(0.15, 0.85, 15)).tolist() if pd.notna(x)]))
-        for direction in gate_direction_hint(col, state):
-            for thr in q_vals:
-                mask = sv >= thr if direction == "gte" else sv <= thr
-                support = int(mask.sum())
-                if support < min_support:
+def learn_combo_gates(df: pd.DataFrame, single_gates: Dict[str, List[Gate]]) -> Dict[str, List[Gate]]:
+    combo_out = {k: [] for k in OUTCOME_SPECS.keys()}
+    for outcome, gates in single_gates.items():
+        y = df[outcome].astype(bool)
+        cand = gates[:MAX_COMBO_CANDIDATES]
+        best_combos = []
+        for i in range(len(cand)):
+            for j in range(i + 1, len(cand)):
+                g1, g2 = cand[i], cand[j]
+                c1, c2 = g1.conditions[0], g2.conditions[0]
+                if c1["feature"] == c2["feature"]:
                     continue
-                hit = float(yv[mask].mean())
-                lift = hit / base if base and base > 0 else np.nan
-                pass_rate = support / len(sv)
-                score = (hit - base) * math.sqrt(support) + 0.05 * pass_rate
-                gates.append({
-                    "feature": col, "direction": direction, "threshold": float(thr), "support": support,
-                    "hit_rate": hit, "base_rate": base, "lift": lift, "score": score
-                })
-    gates = [g for g in gates if np.isfinite(g["score"]) and g["hit_rate"] > g["base_rate"]]
-    gates = sorted(gates, key=lambda x: (x["score"], x["lift"], x["support"]), reverse=True)
-    top = []
-    used = set()
-    for g in gates:
-        if g["feature"] in used:
-            continue
-        top.append(g)
-        used.add(g["feature"])
-        if len(top) >= 8:
-            break
-    return top
+                s1 = pd.to_numeric(df[c1["feature"]], errors="coerce")
+                s2 = pd.to_numeric(df[c2["feature"]], errors="coerce")
+                pmask = eval_condition(s1, c1) & eval_condition(s2, c2)
+                scored = score_gate(pmask, y)
+                if not scored:
+                    continue
+                support, base_rate, hit_rate, lift = scored
+                score = (lift - 1.0) * np.sqrt(support)
+                best_combos.append(Gate(
+                    outcome=outcome,
+                    kind="combo",
+                    description=f"{g1.description} AND {g2.description}",
+                    conditions=[c1, c2],
+                    support=support, base_rate=base_rate, hit_rate=hit_rate, lift=lift, score=score
+                ))
+        combo_out[outcome] = sorted(best_combos, key=lambda g: g.score, reverse=True)[:6]
+    return combo_out
 
-def eval_gate(df: pd.DataFrame, gate: dict) -> pd.Series:
-    s = pd.to_numeric(df[gate["feature"]], errors="coerce")
-    return (s >= gate["threshold"]) if gate["direction"] == "gte" else (s <= gate["threshold"])
+def evaluate_gate_on_row(gate: Dict, row: pd.Series) -> bool:
+    for cond in gate["conditions"]:
+        val = safe_float(row.get(cond["feature"], np.nan))
+        thr = cond["thr"]
+        if pd.isna(val):
+            return False
+        if cond["op"] == ">=" and not (val >= thr):
+            return False
+        if cond["op"] == "<=" and not (val <= thr):
+            return False
+    return True
 
-def learn_combo_gates(train_df: pd.DataFrame, state: str, singles: List[dict], min_support: int = 25) -> List[dict]:
-    y = train_df[state].astype(int)
-    base = float(y.mean())
-    combos = []
-    for i in range(len(singles)):
-        for j in range(i + 1, len(singles)):
-            g1, g2 = singles[i], singles[j]
-            mask = eval_gate(train_df, g1) & eval_gate(train_df, g2)
-            support = int(mask.sum())
-            if support < min_support:
-                continue
-            hit = float(y[mask].mean())
-            if hit <= base:
-                continue
-            lift = hit / base if base > 0 else np.nan
-            score = (hit - base) * math.sqrt(support)
-            combos.append({
-                "gates": [g1, g2], "support": support, "hit_rate": hit, "base_rate": base, "lift": lift, "score": score
-            })
-    combos = sorted(combos, key=lambda x: (x["score"], x["lift"], x["support"]), reverse=True)
-    return combos[:5]
+def save_model(model: Dict):
+    MODEL_JSON.write_text(json.dumps(model, indent=2))
 
-def learn_gate_model(daily_wide: pd.DataFrame, weekly_wide: pd.DataFrame, outcomes: pd.DataFrame) -> dict:
-    model_df = daily_wide.join(outcomes.set_index("date"), how="inner").dropna(subset=["bounce", "repair", "regime", "fall"])
-    daily_features = pick_feature_columns(model_df, PRIMARY_DAILY_FEATURES)
-    learned = {"states": {}, "meta": {"rows": int(len(model_df))}}
-    for state in ["bounce", "repair", "regime", "fall"]:
-        singles = learn_single_gates(model_df, daily_features, state)
-        combos = learn_combo_gates(model_df, state, singles)
-        learned["states"][state] = {"singles": singles, "combos": combos, "base_rate": float(model_df[state].mean())}
-    # weekly regime overlay
-    if weekly_wide is not None and not weekly_wide.empty:
-        wk = weekly_wide.copy()
-        regime_future = outcomes[["date", "regime"]].sort_values("date")
-        wk = pd.merge_asof(wk.sort_index().reset_index().rename(columns={"index":"date"}), regime_future, on="date", direction="forward").dropna(subset=["regime"])
-        weekly_features = pick_feature_columns(wk, PRIMARY_WEEKLY_FEATURES)
-        singles = learn_single_gates(wk, weekly_features, "regime", min_support=10)
-        combos = learn_combo_gates(wk, "regime", singles, min_support=8)
-        learned["weekly_regime"] = {"singles": singles[:6], "combos": combos[:4], "base_rate": float(wk["regime"].mean())}
-    else:
-        learned["weekly_regime"] = {"singles": [], "combos": [], "base_rate": np.nan}
-    return learned
+def load_model() -> Optional[Dict]:
+    if not MODEL_JSON.exists():
+        return None
+    return json.loads(MODEL_JSON.read_text())
 
-def gate_to_text(g: dict) -> str:
-    op = "≥" if g["direction"] == "gte" else "≤"
-    return f"{g['feature']} {op} {g['threshold']:.3f}"
-
-# -----------------------------
-# Live scoring / verdict
-# -----------------------------
-def snapshot_to_feature_row(snapshot: Dict[str, float], feature_cols: List[str]) -> pd.DataFrame:
-    return pd.DataFrame([{c: snapshot.get(c, np.nan) for c in feature_cols}])
-
-def score_state(snapshot: Dict[str, float], state_model: dict) -> dict:
-    single_results = []
-    for g in state_model.get("singles", []):
-        cur = safe_float(snapshot.get(g["feature"], np.nan))
-        passed = (cur >= g["threshold"]) if g["direction"] == "gte" else (cur <= g["threshold"])
-        single_results.append({
-            "text": gate_to_text(g), "passed": bool(passed) if pd.notna(cur) else False, "current": cur,
-            "hit_rate": g["hit_rate"], "lift": g["lift"], "feature": g["feature"], "direction": g["direction"], "threshold": g["threshold"]
-        })
-    combo_results = []
-    for combo in state_model.get("combos", []):
-        gate_passes = []
-        for g in combo["gates"]:
-            cur = safe_float(snapshot.get(g["feature"], np.nan))
-            gate_passes.append((cur >= g["threshold"]) if g["direction"] == "gte" else (cur <= g["threshold"]))
-        passed = all(bool(x) for x in gate_passes)
-        combo_results.append({"text": " AND ".join(gate_to_text(g) for g in combo["gates"]), "passed": passed, "hit_rate": combo["hit_rate"], "lift": combo["lift"]})
-    pass_frac = (sum(r["passed"] for r in single_results) / len(single_results)) if single_results else 0.0
-    passed_hits = [r["hit_rate"] for r in single_results if r["passed"]]
-    passed_lifts = [r["lift"] for r in single_results if r["passed"]]
-    combo_hits = [r["hit_rate"] for r in combo_results if r["passed"]]
-    base = state_model.get("base_rate", np.nan)
-    prob = base
-    if passed_hits:
-        prob = 0.55 * np.mean(passed_hits) + 0.25 * (np.mean(combo_hits) if combo_hits else base) + 0.20 * base
-    prob = float(np.clip(prob * (0.65 + 0.35 * pass_frac), 0, 1)) if pd.notna(prob) else np.nan
-    return {
-        "prob": prob, "pass_frac": pass_frac, "passed_singles": [r for r in single_results if r["passed"]],
-        "failed_singles": [r for r in single_results if not r["passed"]], "passed_combos": [r for r in combo_results if r["passed"]],
-        "single_results": single_results, "combo_results": combo_results, "base_rate": base
-    }
-
-def compute_canary_filter(snapshot: Dict[str, float], prev_snapshot: Dict[str, float]) -> dict:
-    canary_features = ["RSP_SPY__close", "SMH_SPY__close", "IWM_SPY__close", "XLF_SPY__close", "HYG_IEF__close"]
-    stress_feats = ["SPXS_SVOL__close", "VXX__close", "VIX__close"]
-    score = 0
-    reasons = []
-    for f in canary_features:
-        cur, prev = safe_float(snapshot.get(f, np.nan)), safe_float(prev_snapshot.get(f, np.nan))
-        if pd.notna(cur) and pd.notna(prev) and cur > prev:
-            score += 1
-            reasons.append(f"{f} improving")
-    for f in stress_feats:
-        cur, prev = safe_float(snapshot.get(f, np.nan)), safe_float(prev_snapshot.get(f, np.nan))
-        if pd.notna(cur) and pd.notna(prev) and cur < prev:
-            score += 1
-            reasons.append(f"{f} easing")
-    label = "Risk-On" if score >= 5 else "Risk-Off" if score <= 2 else "Neutral"
-    return {"score": score, "label": label, "reasons": reasons}
-
-def compute_intraday_context(snapshot: Dict[str, float], prev_snapshot: Dict[str, float], use_proxy: bool) -> dict:
-    p_nymo = compute_proxy_nymo(snapshot, prev_snapshot)
-    p_nysi = compute_proxy_nysi(snapshot, prev_snapshot)
-    official_nymo = safe_float(snapshot.get("$NYMO__close", np.nan))
-    official_nysi = safe_float(snapshot.get("$NYSI__close", np.nan))
-    eff_nymo = p_nymo["proxy_nymo"] if use_proxy or pd.isna(official_nymo) else official_nymo
-    eff_nysi = p_nysi["proxy_nysi"] if use_proxy or pd.isna(official_nysi) else official_nysi
-    return {
-        "nymo": eff_nymo, "nymo_delta": p_nymo["proxy_delta"] if use_proxy or pd.isna(official_nymo) else official_nymo - safe_float(prev_snapshot.get("$NYMO__close", np.nan)),
-        "nysi": eff_nysi, "nysi_delta": p_nysi["proxy_delta"] if use_proxy or pd.isna(official_nysi) else official_nysi - safe_float(prev_snapshot.get("$NYSI__close", np.nan)),
-        "mode": "Proxy" if use_proxy or pd.isna(official_nymo) else "Official"
-    }
-
-def classify_signal(state_scores: dict, intraday: dict, canary: dict, weekly_score: Optional[dict]) -> dict:
-    bounce = state_scores["bounce"]
-    repair = state_scores["repair"]
-    regime = state_scores["regime"]
-    fall = state_scores["fall"]
-    weekly_pass = weekly_score["pass_frac"] if weekly_score else 0.0
-
-    signal = "HOLD"
-    reasons = []
-    gate_params = {}
-
-    # hard directional logic
-    long_flag = (
-        (bounce["pass_frac"] >= 0.60 and bounce["prob"] >= max(0.45, bounce["base_rate"] + 0.08)) or
-        (repair["pass_frac"] >= 0.60 and repair["prob"] >= max(0.35, repair["base_rate"] + 0.06)) or
-        (regime["pass_frac"] >= 0.55 and regime["prob"] >= max(0.40, regime["base_rate"] + 0.05) and weekly_pass >= 0.40)
-    )
-    short_flag = (
-        (fall["pass_frac"] >= 0.60 and fall["prob"] >= max(0.40, fall["base_rate"] + 0.08)) and
-        (repair["pass_frac"] < 0.45) and (regime["pass_frac"] < 0.40)
-    )
-
-    if long_flag and canary["label"] != "Risk-Off":
-        signal = "LONG"
-    elif short_flag and canary["label"] != "Risk-On":
-        signal = "SHORT"
-    else:
-        signal = "HOLD"
-
-    def add_reasons(label, score_obj, n=3):
-        for r in score_obj["passed_singles"][:n]:
-            reasons.append(f"{label}: {r['feature']} {'≥' if r['direction']=='gte' else '≤'} {r['threshold']:.3f}")
-            gate_params[r["feature"]] = snapshot_value_str(r["current"], r["threshold"], r["direction"])
-
-    if signal == "LONG":
-        if repair["pass_frac"] >= bounce["pass_frac"] and repair["pass_frac"] >= regime["pass_frac"]:
-            add_reasons("Repair", repair)
-        elif regime["pass_frac"] >= bounce["pass_frac"]:
-            add_reasons("Regime", regime)
+# =============================
+# Snapshot feature generation
+# =============================
+def apply_snapshot_overrides(daily_hist: pd.DataFrame, snapshot_df: pd.DataFrame) -> pd.DataFrame:
+    hist = daily_hist.copy()
+    if snapshot_df.empty:
+        return hist
+    latest_date = hist["date"].max()
+    snap_map = dict(zip(snapshot_df["symbol"], snapshot_df["close"]))
+    for sym, close in snap_map.items():
+        mask = (hist["symbol"] == sym) & (hist["date"] == latest_date)
+        if mask.any():
+            hist.loc[mask, "close"] = float(close)
+            hist.loc[mask, "high"] = np.maximum(hist.loc[mask, "high"], float(close))
+            hist.loc[mask, "low"] = np.minimum(hist.loc[mask, "low"], float(close))
         else:
-            add_reasons("Bounce", bounce)
-        reasons.append(f"Canary: {canary['label']}")
-        reasons.append(f"NYMO context: {intraday['mode']} {fmt_num(intraday['nymo'])}")
-    elif signal == "SHORT":
-        add_reasons("Fall", fall)
-        reasons.append(f"Canary: {canary['label']}")
-        reasons.append(f"NYMO context: {intraday['mode']} {fmt_num(intraday['nymo'])}")
+            hist = pd.concat([hist, pd.DataFrame([{
+                "date": latest_date, "symbol": sym, "open": float(close), "high": float(close),
+                "low": float(close), "close": float(close), "volume": 0.0, "timeframe": "daily"
+            }])], ignore_index=True)
+    return hist.sort_values(["symbol", "date"])
+
+def canary_from_row(row: pd.Series) -> Tuple[str, float]:
+    checks = []
+    for feat, direction in [("RSP_SPY__D3", ">"), ("SMH_SPY__D3", ">"), ("IWM_SPY__D3", ">"),
+                            ("XLF_SPY__D3", ">"), ("HYG_IEF__D3", ">"), ("SPXS_SVOL__D3", "<"),
+                            ("VXX__D3", "<"), ("$VIX__D3", "<")]:
+        val = safe_float(row.get(feat, np.nan))
+        if pd.isna(val):
+            continue
+        checks.append((val > 0) if direction == ">" else (val < 0))
+    if not checks:
+        return "Neutral", 50.0
+    pct = 100.0 * float(np.mean(checks))
+    if pct >= 65:
+        return "Risk-On", pct
+    if pct <= 35:
+        return "Risk-Off", pct
+    return "Neutral", pct
+
+def analyze_current_snapshot(model: Dict, daily_hist: pd.DataFrame, weekly_hist: pd.DataFrame, snapshot_df: pd.DataFrame, use_proxy: bool = True) -> Dict:
+    hist_rt = apply_snapshot_overrides(daily_hist, snapshot_df)
+    close_df = pivot_close(hist_rt)
+    feat_df = build_level_and_trend_features(close_df)
+    latest = feat_df.iloc[-1].copy()
+    prior = feat_df.iloc[-2].copy() if len(feat_df) > 1 else pd.Series(dtype=float)
+
+    # proxy governance
+    if use_proxy and "NYMO_PROXY" in latest.index:
+        latest["$NYMO_EFF"] = latest["NYMO_PROXY"]
+        latest["$NYSI_EFF"] = latest.get("NYSI_PROXY", np.nan)
     else:
-        reasons.append("Mixed historical gates; no strong edge.")
-        reasons.append(f"Bounce {bounce['pass_frac']:.0%} / Repair {repair['pass_frac']:.0%} / Regime {regime['pass_frac']:.0%} / Fall {fall['pass_frac']:.0%}")
-        reasons.append(f"Canary: {canary['label']}")
-    return {"signal": signal, "reasons": reasons[:6], "gate_params": gate_params}
+        latest["$NYMO_EFF"] = latest.get("$NYMO", np.nan)
+        latest["$NYSI_EFF"] = latest.get("$NYSI", np.nan)
 
-def snapshot_value_str(current: float, threshold: float, direction: str) -> str:
-    op = "≥" if direction == "gte" else "≤"
-    return f"{fmt_num(current)} vs {op} {threshold:.3f}"
+    gate_results = {}
+    reasons = []
+    for outcome in ["bounce", "repair", "regime", "fall"]:
+        singles = model["gates"][outcome]["single"]
+        combos = model["gates"][outcome]["combo"]
+        passed = []
+        for g in singles + combos:
+            if evaluate_gate_on_row(g, latest):
+                passed.append(g)
+        top = sorted(passed, key=lambda x: x["score"], reverse=True)[:3]
+        if top:
+            prob = float(np.mean([g["hit_rate"] for g in top]))
+            base = float(np.mean([g["base_rate"] for g in top]))
+            support = int(np.mean([g["support"] for g in top]))
+        else:
+            prob = model["base_rates"][outcome]
+            base = model["base_rates"][outcome]
+            support = 0
+        gate_results[outcome] = {
+            "prob": prob, "base": base, "support": support, "passed": top
+        }
 
-# -----------------------------
-# Persistence model builder
-# -----------------------------
-def build_and_persist_model(hist_zip_bytes: bytes):
-    daily, weekly = parse_stockcharts_zip(hist_zip_bytes)
-    daily.to_parquet(DAILY_BASELINE_PATH, index=False)
-    if not weekly.empty:
-        weekly.to_parquet(WEEKLY_BASELINE_PATH, index=False)
-    daily_feat = add_indicator_features(daily)
-    daily_feat.to_parquet(DAILY_FEATURES_PATH, index=False)
-    weekly_feat = pd.DataFrame()
-    if not weekly.empty:
-        weekly_feat = add_indicator_features(weekly)
-        weekly_feat.to_parquet(WEEKLY_FEATURES_PATH, index=False)
-    outcomes = build_forward_outcomes(daily_feat)
-    daily_wide = features_wide(daily_feat, FEATURE_LEVELS)
-    weekly_wide = features_wide(weekly_feat, FEATURE_LEVELS) if not weekly_feat.empty else pd.DataFrame()
-    model = learn_gate_model(daily_wide, weekly_wide, outcomes)
-    save_json(MODEL_PATH, model)
-    return daily, weekly, daily_feat, weekly_feat, model
+    # improvement breadth
+    improve_features = ["$NYSI__D3", "$NYMO__D3", "$BPSPX__BBP_D3", "$SPXA50R__D3", "$NYHL__D3", "$TRIN__D3", "$CPCE__D3"]
+    improve_hits = 0
+    improve_total = 0
+    improve_notes = []
+    for feat in improve_features:
+        val = safe_float(latest.get(feat, np.nan))
+        if pd.isna(val):
+            continue
+        improve_total += 1
+        bullish = (val > 0) if feat not in {"$TRIN__D3", "$CPCE__D3"} else (val < 0)
+        if bullish:
+            improve_hits += 1
+        improve_notes.append((feat, val, bullish))
+    improve_frac = improve_hits / improve_total if improve_total else np.nan
 
-def load_persisted_artifacts():
-    if not (DAILY_FEATURES_PATH.exists() and MODEL_PATH.exists()):
-        return None, None, None, None, None
-    daily = pd.read_parquet(DAILY_BASELINE_PATH) if DAILY_BASELINE_PATH.exists() else None
-    weekly = pd.read_parquet(WEEKLY_BASELINE_PATH) if WEEKLY_BASELINE_PATH.exists() else pd.DataFrame()
-    daily_feat = pd.read_parquet(DAILY_FEATURES_PATH)
-    weekly_feat = pd.read_parquet(WEEKLY_FEATURES_PATH) if WEEKLY_FEATURES_PATH.exists() else pd.DataFrame()
-    model = load_json(MODEL_PATH, {})
-    return daily, weekly, daily_feat, weekly_feat, model
+    canary_label, canary_score = canary_from_row(latest)
+    weekly_overlay = build_weekly_overlay(weekly_hist)
 
-# -----------------------------
-# UI sidebar / data loading
-# -----------------------------
-st.sidebar.header("Model Inputs")
-use_proxy = st.sidebar.toggle("Use proxy NYMO/NYSI before official evening data", value=True)
-force_rebuild = st.sidebar.toggle("Force rebuild historical model", value=False)
-if st.sidebar.button("Reset saved historical model"):
-    for p in [DAILY_BASELINE_PATH, WEEKLY_BASELINE_PATH, DAILY_FEATURES_PATH, WEEKLY_FEATURES_PATH, MODEL_PATH]:
-        if p.exists():
-            p.unlink()
-    st.sidebar.success("Saved historical model cleared. Upload the historical zip again.")
+    # verdict logic
+    b, r, g, f = gate_results["bounce"]["prob"], gate_results["repair"]["prob"], gate_results["regime"]["prob"], gate_results["fall"]["prob"]
+    verdict, reason = "HOLD", "Mixed historical gates; no strong edge."
+    if ((b >= max(0.50, gate_results["bounce"]["base"] * 1.5)) or (r >= max(0.42, gate_results["repair"]["base"] * 1.5))) and \
+       f < max(0.30, gate_results["fall"]["base"] * 1.15) and canary_label != "Risk-Off":
+        verdict = "LONG"
+        reason = "Bounce / repair probabilities are historically favorable and downside gates are not dominant."
+    elif f >= max(0.40, gate_results["fall"]["base"] * 1.5) and b < max(0.35, gate_results["bounce"]["base"] * 1.15) and canary_label == "Risk-Off":
+        verdict = "SHORT"
+        reason = "Fall gates dominate, long-side bounce / repair odds are weak, and canary is risk-off."
+    elif improve_frac >= 0.65 and b >= gate_results["bounce"]["base"] and canary_label != "Risk-Off":
+        verdict = "LONG"
+        reason = "Improvement breadth is broad even though absolute levels remain imperfect."
+    elif canary_label == "Risk-Off" and weekly_overlay.get("available") and safe_float(weekly_overlay.get("pass_fraction", np.nan)) < 0.45:
+        verdict = "SHORT"
+        reason = "Canary and weekly overlay are both risk-off / weak."
 
-hist_file = st.sidebar.file_uploader("One-time historical upload (.zip)", type=["zip"])
-snap_file = st.sidebar.file_uploader("Daily snapshot upload (.csv)", type=["csv"])
+    # build reasons
+    for outcome in ["bounce", "repair", "regime", "fall"]:
+        for gte in gate_results[outcome]["passed"][:2]:
+            reasons.append(f"{outcome.title()} gate: {gte['description']} (hit {gte['hit_rate']:.0%}, base {gte['base_rate']:.0%})")
+    if not reasons:
+        reasons.append("No strong gate alignment today.")
+    if improve_total:
+        reasons.append(f"Improvement breadth: {improve_hits}/{improve_total} tracked repair features are improving.")
+    reasons.append(f"Canary: {canary_label} ({canary_score:.0f})")
+    if weekly_overlay.get("available"):
+        reasons.append(f"Weekly regime pass fraction: {weekly_overlay.get('pass_fraction', np.nan):.0%}")
 
-daily, weekly, daily_feat, weekly_feat, model = load_persisted_artifacts()
-if hist_file is not None and (force_rebuild or daily_feat is None):
-    with st.spinner("Building historical gate model from uploaded zip..."):
-        daily, weekly, daily_feat, weekly_feat, model = build_and_persist_model(hist_file.getvalue())
-    st.success("Historical gate model built and saved. You will not need to upload the historical zip again unless you want to rebuild the model.")
-elif daily_feat is not None and model:
-    st.info("Using saved historical gate model. Historical upload is not required again unless you want to refresh the model.")
+    return {
+        "latest_date": str(close_df.index.max().date()),
+        "latest_row": latest.to_dict(),
+        "prior_row": prior.to_dict() if len(prior) else {},
+        "gate_results": gate_results,
+        "canary_label": canary_label,
+        "canary_score": canary_score,
+        "weekly_overlay": weekly_overlay,
+        "verdict": verdict,
+        "reason": reason,
+        "reasons": reasons,
+        "improvement_fraction": improve_frac,
+        "improvement_notes": improve_notes,
+    }
 
-if daily_feat is None or not model:
-    st.warning("Upload your historical StockCharts zip once to build the gate model.")
+# =============================
+# UI helpers
+# =============================
+def render_signal_box(verdict: str, text: str):
+    cls = {"LONG": "signal-long", "SHORT": "signal-short"}.get(verdict, "signal-hold")
+    st.markdown(f"<div class='{cls}'><div style='font-size:1.7rem;font-weight:900;'>📌 Daily Verdict: {verdict}</div><div>{text}</div></div>", unsafe_allow_html=True)
+
+def line_for_gate(gate):
+    return f"{gate['description']} | hit {gate['hit_rate']:.0%} vs base {gate['base_rate']:.0%} | support {gate['support']}"
+
+def maybe_save_baseline(daily_hist: pd.DataFrame, weekly_hist: pd.DataFrame):
+    daily_hist.to_parquet(DAILY_HIST_PARQUET, index=False)
+    if not weekly_hist.empty:
+        weekly_hist.to_parquet(WEEKLY_HIST_PARQUET, index=False)
+
+# =============================
+# Build model
+# =============================
+def build_model_from_history(daily_hist: pd.DataFrame, weekly_hist: pd.DataFrame) -> Dict:
+    close_df = pivot_close(daily_hist)
+    if "RSP" not in close_df.columns:
+        raise ValueError("Historical ZIP must include RSP daily history.")
+    feat_df = build_level_and_trend_features(close_df)
+    full_df = add_forward_outcomes(close_df, feat_df).dropna(subset=["bounce", "repair", "regime", "fall"], how="any")
+    # Only use features likely to matter
+    candidate_feats = []
+    for col in full_df.columns:
+        if col in OUTCOME_SPECS:
+            continue
+        if "__ROC" in col or "__D" in col or "__BBP" in col or "__RSI14" in col or "__CCI20" in col:
+            candidate_feats.append(col)
+        elif col in PRIMARY_FEATURES:
+            candidate_feats.append(col)
+    candidate_feats = [c for c in candidate_feats if full_df[c].notna().sum() >= MIN_GATE_SUPPORT * 2]
+    single = learn_single_feature_gates(full_df, candidate_feats)
+    combo = learn_combo_gates(full_df, single)
+
+    model = {
+        "created_at": str(pd.Timestamp.now()),
+        "base_rates": {k: float(full_df[k].mean()) for k in OUTCOME_SPECS.keys()},
+        "gates": {k: {"single": [asdict(g) for g in single[k]], "combo": [asdict(g) for g in combo[k]]} for k in OUTCOME_SPECS.keys()},
+        "features_used": candidate_feats,
+        "daily_rows": int(len(daily_hist)),
+        "weekly_rows": int(len(weekly_hist)),
+        "symbols_daily": sorted(daily_hist["symbol"].unique().tolist()),
+        "symbols_weekly": sorted(weekly_hist["symbol"].unique().tolist()) if not weekly_hist.empty else [],
+    }
+    save_model(model)
+    maybe_save_baseline(daily_hist, weekly_hist)
+    return model
+
+# =============================
+# Main app
+# =============================
+st.title("Breadth Historical Gate Engine Pro")
+st.caption("Historically learned hard gates for bounce / repair / regime / fall, plus improvement-analysis and a single LONG / SHORT / HOLD verdict.")
+
+with st.sidebar:
+    st.subheader("Model Controls")
+    use_proxy = st.toggle("Use proxy NYMO/NYSI before official evening data", value=True)
+    force_rebuild = st.button("Force rebuild historical model")
+    reset_model = st.button("Reset saved model")
+    if reset_model:
+        for p in [MODEL_JSON, DAILY_HIST_PARQUET, WEEKLY_HIST_PARQUET]:
+            if p.exists():
+                p.unlink()
+        st.success("Saved model reset.")
+
+hist_upload = st.file_uploader("One-time historical upload (.zip)", type=["zip"])
+snap_upload = st.file_uploader("Daily snapshot upload (.csv)", type=["csv"])
+
+model = load_model()
+daily_hist = pd.read_parquet(DAILY_HIST_PARQUET) if DAILY_HIST_PARQUET.exists() else pd.DataFrame()
+weekly_hist = pd.read_parquet(WEEKLY_HIST_PARQUET) if WEEKLY_HIST_PARQUET.exists() else pd.DataFrame()
+
+if hist_upload is not None:
+    try:
+        daily_hist, weekly_hist = parse_stockcharts_zip(hist_upload.read())
+        if force_rebuild or model is None:
+            with st.spinner("Learning historical gates from uploaded history..."):
+                model = build_model_from_history(daily_hist, weekly_hist)
+        else:
+            maybe_save_baseline(daily_hist, weekly_hist)
+            model = load_model()
+        st.success("Historical ZIP parsed and model saved.")
+    except Exception as e:
+        st.error(f"Historical upload failed: {e}")
+
+if model is None:
+    st.info("Upload your historical StockCharts ZIP once to build the gate model.")
     st.stop()
 
-# -----------------------------
-# Current snapshot assembly
-# -----------------------------
-base_snapshot = latest_snapshot_dict(daily_feat)
-prev_snapshot = prior_snapshot_dict(daily_feat)
+if hist_upload is None and DAILY_HIST_PARQUET.exists():
+    st.success("Using saved historical gate model. Historical upload is not required again unless you want to refresh the model.")
 
-if snap_file is not None:
-    snapshot_df = parse_realtime_snapshot(snap_file.getvalue())
-    snap_path = save_snapshot_file(snapshot_df)
-    overrides = recompute_latest_indicators_from_snapshot(daily_feat, snapshot_df)
-    live_snapshot = base_snapshot.copy()
-    for sym, vals in overrides.items():
-        for feat, val in vals.items():
-            live_snapshot[f"{sym}__{feat}"] = val
-else:
-    snapshot_df = pd.DataFrame()
-    live_snapshot = base_snapshot.copy()
-    snap_path = None
+if daily_hist.empty and DAILY_HIST_PARQUET.exists():
+    daily_hist = pd.read_parquet(DAILY_HIST_PARQUET)
+if weekly_hist.empty and WEEKLY_HIST_PARQUET.exists():
+    weekly_hist = pd.read_parquet(WEEKLY_HIST_PARQUET)
 
-intraday = compute_intraday_context(live_snapshot, prev_snapshot, use_proxy)
-live_snapshot["$NYMO__close_effective"] = intraday["nymo"]
-live_snapshot["$NYSI__close_effective"] = intraday["nysi"]
+snapshot_df = pd.DataFrame()
+if snap_upload is not None:
+    try:
+        snapshot_df = parse_snapshot_csv(snap_upload.read())
+        append_upload_history({"upload_ts": str(pd.Timestamp.now()), "rows": int(len(snapshot_df))})
+    except Exception as e:
+        st.error(f"Snapshot upload failed: {e}")
 
-# -----------------------------
-# Score snapshot against learned gates
-# -----------------------------
-state_scores = {}
-for state in ["bounce", "repair", "regime", "fall"]:
-    state_scores[state] = score_state(live_snapshot, model["states"][state])
+analysis = analyze_current_snapshot(model, daily_hist, weekly_hist, snapshot_df, use_proxy=use_proxy)
 
-weekly_score = None
-if weekly_feat is not None and not weekly_feat.empty and model.get("weekly_regime", {}).get("singles"):
-    wk_base = latest_snapshot_dict(weekly_feat)
-    weekly_score = score_state(wk_base, model["weekly_regime"])
+render_signal_box(analysis["verdict"], analysis["reason"])
 
-canary = compute_canary_filter(live_snapshot, prev_snapshot)
-decision = classify_signal(state_scores, intraday, canary, weekly_score)
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    st.metric("Bounce probability", f"{analysis['gate_results']['bounce']['prob']:.0%}", delta=f"base {analysis['gate_results']['bounce']['base']:.0%}")
+with c2:
+    st.metric("Repair probability", f"{analysis['gate_results']['repair']['prob']:.0%}", delta=f"base {analysis['gate_results']['repair']['base']:.0%}")
+with c3:
+    st.metric("Regime probability", f"{analysis['gate_results']['regime']['prob']:.0%}", delta=f"base {analysis['gate_results']['regime']['base']:.0%}")
+with c4:
+    st.metric("Fall probability", f"{analysis['gate_results']['fall']['prob']:.0%}", delta=f"base {analysis['gate_results']['fall']['base']:.0%}")
 
-# save upload history if snapshot uploaded
-if snap_file is not None and snap_path is not None:
-    append_upload_history({
-        "upload_ts": datetime.now().isoformat(timespec="seconds"),
-        "snapshot_file": str(snap_path),
-        "verdict": decision["signal"],
-        "bounce_prob": state_scores["bounce"]["prob"],
-        "repair_prob": state_scores["repair"]["prob"],
-        "regime_prob": state_scores["regime"]["prob"],
-        "fall_prob": state_scores["fall"]["prob"],
-    })
+c5, c6, c7, c8 = st.columns(4)
+with c5:
+    st.metric("Canary", analysis["canary_label"], f"{analysis['canary_score']:.0f}")
+with c6:
+    st.metric("Proxy NYMO", f"{safe_float(analysis['latest_row'].get('$NYMO_EFF', np.nan)):.2f}")
+with c7:
+    st.metric("Proxy NYSI", f"{safe_float(analysis['latest_row'].get('$NYSI_EFF', np.nan)):.2f}")
+with c8:
+    pf = analysis["weekly_overlay"].get("pass_fraction", np.nan)
+    st.metric("Weekly pass fraction", "n/a" if pd.isna(pf) else f"{pf:.0%}")
 
-# -----------------------------
-# Charts
-# -----------------------------
-def make_breadth_chart(hist_feat: pd.DataFrame, live_snapshot: Dict[str, float], sym: str) -> go.Figure:
-    g = hist_feat[hist_feat["symbol"] == sym].sort_values("date").tail(180).copy()
-    if g.empty:
-        return go.Figure()
-    live_close = live_snapshot.get(f"{sym}__close", np.nan)
-    if pd.notna(live_close):
-        g.loc[g.index[-1], "close"] = live_close
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=g["date"], y=g["close"], name="Close", line=dict(width=2)))
-    if "pct_b20" in g.columns:
-        fig.add_trace(go.Scatter(x=g["date"], y=g["pct_b20"], name="%B", yaxis="y2", line=dict(width=1.5)))
-    fig.update_layout(
-        template="plotly_dark", height=350, margin=dict(l=20, r=20, t=30, b=20),
-        yaxis=dict(title=sym), yaxis2=dict(title="%B", overlaying="y", side="right", showgrid=False),
-        legend=dict(orientation="h")
-    )
-    return fig
-
-# -----------------------------
-# Dashboard
-# -----------------------------
 tab1, tab2, tab3 = st.tabs(["Decision Dashboard", "Learned Gates", "History / Uploads"])
 
-# Tab 1
 with tab1:
-    c1, c2, c3, c4 = st.columns([1.1, 1.1, 1.1, 1.3])
-    with c1:
-        st.markdown('<div class="soft-card">', unsafe_allow_html=True)
-        st.markdown('<div class="metric-label">Daily Verdict</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="metric-big">{decision["signal"]}</div>', unsafe_allow_html=True)
-        st.markdown(color_pill(canary["label"]), unsafe_allow_html=True)
-        st.markdown(color_pill(intraday["mode"]), unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="soft-card">', unsafe_allow_html=True)
-        st.markdown('<div class="metric-label">Bounce / Repair</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="metric-big">{round(100*state_scores["bounce"]["prob"]):.0f} / {round(100*state_scores["repair"]["prob"]):.0f}</div>', unsafe_allow_html=True)
-        st.caption("Historical probabilities")
-        st.markdown("</div>", unsafe_allow_html=True)
-    with c3:
-        st.markdown('<div class="soft-card">', unsafe_allow_html=True)
-        st.markdown('<div class="metric-label">Regime / Fall</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="metric-big">{round(100*state_scores["regime"]["prob"]):.0f} / {round(100*state_scores["fall"]["prob"]):.0f}</div>', unsafe_allow_html=True)
-        st.caption("Historical probabilities")
-        st.markdown("</div>", unsafe_allow_html=True)
-    with c4:
-        st.markdown('<div class="soft-card">', unsafe_allow_html=True)
-        st.markdown('<div class="metric-label">Intraday Proxy Context</div>', unsafe_allow_html=True)
-        st.markdown(f"NYMO: **{fmt_num(intraday['nymo'])}**  \nΔ: **{fmt_num(intraday['nymo_delta'])}**")
-        st.markdown(f"NYSI: **{fmt_num(intraday['nysi'])}**  \nΔ: **{fmt_num(intraday['nysi_delta'])}**")
-        if weekly_score:
-            st.caption(f"Weekly regime pass fraction: {weekly_score['pass_frac']:.0%}")
-        st.markdown("</div>", unsafe_allow_html=True)
+    left, right = st.columns([1.2, 1.0])
+    with left:
+        st.markdown("### Why")
+        for r in analysis["reasons"]:
+            st.write(f"• {r}")
+        st.markdown("### Gate Inputs")
+        gate_input_lines = []
+        for feat in ["$BPSPX__BBP", "$BPSPX", "$SPXA50R", "$NYMO_EFF", "$NYSI_EFF", "$NYHL", "$TRIN", "$CPCE", "$VIX", "VXX", "RSP_SPY"]:
+            val = analysis["latest_row"].get(feat, np.nan)
+            if pd.notna(val):
+                gate_input_lines.append((feat, val))
+        if gate_input_lines:
+            st.dataframe(pd.DataFrame(gate_input_lines, columns=["Feature", "Value"]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No strong gate alignment today.")
+        st.markdown("### Improvement Analysis")
+        imp = pd.DataFrame(analysis["improvement_notes"], columns=["Feature", "Delta", "Bullish?"])
+        if not imp.empty:
+            st.dataframe(imp, use_container_width=True, hide_index=True)
+        else:
+            st.info("No improvement metrics were available.")
+    with right:
+        st.markdown("### Current Snapshot Core Readings")
+        core_keys = ["$BPSPX", "$BPSPX__BBP", "$SPXA50R", "$NYMO", "$NYSI", "$NYAD", "$SPXADP", "$NYHL", "$TRIN", "$CPCE", "$VIX", "VXX", "RSP_SPY"]
+        core = []
+        for k in core_keys:
+            v = analysis["latest_row"].get(k, np.nan)
+            if pd.notna(v):
+                core.append((k, v))
+        st.dataframe(pd.DataFrame(core, columns=["Feature", "Current"]), use_container_width=True, hide_index=True)
 
-    action_cls = {"LONG": "action-long", "SHORT":"action-short", "HOLD":"action-hold"}[decision["signal"]]
-    st.markdown(f'<div class="action-box {action_cls}"><b>{decision["signal"]}</b> — ' + " | ".join(decision["reasons"]) + "</div>", unsafe_allow_html=True)
+        chart_symbol = st.selectbox("Breadth chart", ["$SPXA50R", "$BPSPX", "$NYMO", "$NYSI", "$NYHL", "$TRIN", "$CPCE", "$VIX", "VXX", "RSP"])
+        close_df = pivot_close(apply_snapshot_overrides(daily_hist, snapshot_df))
+        feat_df = build_level_and_trend_features(close_df)
+        fig = go.Figure()
+        if chart_symbol in close_df.columns:
+            fig.add_trace(go.Scatter(x=close_df.index, y=close_df[chart_symbol], name=chart_symbol))
+        bcol = f"{chart_symbol}__BBP"
+        if bcol in feat_df.columns:
+            fig.add_trace(go.Scatter(x=feat_df.index, y=feat_df[bcol], name="%B", yaxis="y2"))
+        fig.update_layout(height=420, margin=dict(l=10, r=10, t=25, b=10), yaxis2=dict(overlaying="y", side="right"))
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Gate Verdicts")
-    verdict_cols = st.columns(4)
-    for col, state in zip(verdict_cols, ["bounce", "repair", "regime", "fall"]):
-        obj = state_scores[state]
-        with col:
-            st.metric(
-                label=state.capitalize(),
-                value=f"{round(100*obj['prob']):.0f}%",
-                delta=f"Pass {obj['pass_frac']:.0%} | Base {obj['base_rate']:.0%}"
-            )
-
-    st.subheader("Why")
-    for r in decision["reasons"]:
-        st.write(f"• {r}")
-
-    st.subheader("Gate Inputs")
-    if decision["gate_params"]:
-        gate_df = pd.DataFrame([{"Feature": k, "Current vs Gate": v} for k, v in decision["gate_params"].items()])
-        st.dataframe(gate_df, use_container_width=True, hide_index=True)
-    else:
-        st.write("No strong gate alignment today.")
-
-    st.subheader("Current Snapshot Core Readings")
-    core = {
-        "BPSPX %B": live_snapshot.get("$BPSPX__pct_b20"),
-        "BPSPX": live_snapshot.get("$BPSPX__close"),
-        "BPNYA": live_snapshot.get("$BPNYA__close"),
-        "SPXA50R": live_snapshot.get("$SPXA50R__close"),
-        "NYMO eff": intraday["nymo"],
-        "NYSI eff": intraday["nysi"],
-        "NYAD": live_snapshot.get("$NYAD__close"),
-        "SPXADP": live_snapshot.get("$SPXADP__close"),
-        "NYHL": live_snapshot.get("$NYHL__close"),
-        "CPCE": live_snapshot.get("$CPCE__close"),
-        "TRIN": live_snapshot.get("$TRIN__close"),
-        "VIX": live_snapshot.get("VIX__close"),
-        "VXX": live_snapshot.get("VXX__close"),
-        "RSP:SPY": live_snapshot.get("RSP_SPY__close"),
-    }
-    core_df = pd.DataFrame({"Metric": list(core.keys()), "Value": [fmt_num(v, 3) for v in core.values()]})
-    st.dataframe(core_df, use_container_width=True, hide_index=True)
-
-    chart_symbol = st.selectbox("Breadth chart", options=["$BPSPX", "$SPXA50R", "$NYMO", "$NYSI", "$NYHL", "$TRIN", "RSP", "VIX", "VXX"], index=0)
-    st.plotly_chart(make_breadth_chart(daily_feat, live_snapshot, chart_symbol), use_container_width=True)
-
-# Tab 2
 with tab2:
-    st.subheader("Learned Hard Gates")
-    choice = st.selectbox("State", options=["bounce", "repair", "regime", "fall", "weekly_regime"])
-    if choice == "weekly_regime":
-        bucket = model["weekly_regime"]
-    else:
-        bucket = model["states"][choice]
-    st.caption(f"Base rate: {fmt_num(100*bucket['base_rate'],1)}%")
-    sing = pd.DataFrame(bucket.get("singles", []))
-    if not sing.empty:
-        sing["gate"] = sing.apply(lambda r: gate_to_text(r.to_dict()), axis=1)
-        sing = sing[["gate", "support", "hit_rate", "base_rate", "lift"]]
-        sing["hit_rate"] = (100*sing["hit_rate"]).round(1)
-        sing["base_rate"] = (100*sing["base_rate"]).round(1)
-        sing["lift"] = sing["lift"].round(2)
-        st.markdown("**Top single gates**")
-        st.dataframe(sing, use_container_width=True, hide_index=True)
-    combos = pd.DataFrame(bucket.get("combos", []))
-    if not combos.empty:
-        combos["gate"] = combos["gates"].apply(lambda gates: " AND ".join(gate_to_text(g) for g in gates))
-        combos = combos[["gate", "support", "hit_rate", "base_rate", "lift"]]
-        combos["hit_rate"] = (100*combos["hit_rate"]).round(1)
-        combos["base_rate"] = (100*combos["base_rate"]).round(1)
-        combos["lift"] = combos["lift"].round(2)
-        st.markdown("**Top combo gates**")
-        st.dataframe(combos, use_container_width=True, hide_index=True)
+    for outcome in ["bounce", "repair", "regime", "fall"]:
+        st.markdown(f"### {outcome.title()} gates")
+        cols = st.columns(2)
+        with cols[0]:
+            st.markdown("**Best single gates**")
+            singles = model["gates"][outcome]["single"]
+            if singles:
+                st.dataframe(pd.DataFrame([{
+                    "Gate": g["description"], "Hit": f"{g['hit_rate']:.0%}", "Base": f"{g['base_rate']:.0%}",
+                    "Lift": round(g["lift"], 2), "Support": g["support"]
+                } for g in singles]), use_container_width=True, hide_index=True)
+            else:
+                st.info("No single gates found.")
+        with cols[1]:
+            st.markdown("**Best combo gates**")
+            combos = model["gates"][outcome]["combo"]
+            if combos:
+                st.dataframe(pd.DataFrame([{
+                    "Gate": g["description"], "Hit": f"{g['hit_rate']:.0%}", "Base": f"{g['base_rate']:.0%}",
+                    "Lift": round(g["lift"], 2), "Support": g["support"]
+                } for g in combos]), use_container_width=True, hide_index=True)
+            else:
+                st.info("No combo gates found.")
 
-    st.subheader("Current state pass / fail")
-    current_rows = []
-    for state in ["bounce", "repair", "regime", "fall"]:
-        obj = state_scores[state]
-        for r in obj["single_results"]:
-            current_rows.append({
-                "State": state.capitalize(), "Gate": r["text"], "Passed": r["passed"], "Current": fmt_num(r["current"], 3), "HitRate%": round(100*r["hit_rate"], 1)
-            })
-    cur_df = pd.DataFrame(current_rows)
-    st.dataframe(cur_df, use_container_width=True, hide_index=True)
-
-# Tab 3
 with tab3:
-    st.subheader("Historical model summary")
-    summary_df = pd.DataFrame({
-        "Dataset": ["Daily baseline", "Weekly baseline"],
-        "Rows": [len(daily_feat), len(weekly_feat) if weekly_feat is not None else 0],
-        "Symbols": [daily_feat["symbol"].nunique(), weekly_feat["symbol"].nunique() if weekly_feat is not None and not weekly_feat.empty else 0],
-        "LatestDate": [str(pd.to_datetime(daily_feat["date"]).max().date()), str(pd.to_datetime(weekly_feat["date"]).max().date()) if weekly_feat is not None and not weekly_feat.empty else "n/a"],
+    st.markdown("### Saved model summary")
+    st.json({
+        "created_at": model["created_at"],
+        "daily_rows": model["daily_rows"],
+        "weekly_rows": model["weekly_rows"],
+        "symbols_daily_count": len(model["symbols_daily"]),
+        "symbols_weekly_count": len(model["symbols_weekly"]),
+        "latest_baseline_date": analysis["latest_date"],
     })
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-    st.markdown("**Detected symbols**")
-    st.write(", ".join(sorted(daily_feat["symbol"].unique().tolist())))
-
-    hist = load_upload_history()
-    if not hist.empty:
-        st.subheader("Recent snapshot verdicts")
-        st.dataframe(hist.tail(10), use_container_width=True, hide_index=True)
-    else:
-        st.write("No snapshot upload history yet.")
+    if UPLOAD_HISTORY_CSV.exists():
+        hist = pd.read_csv(UPLOAD_HISTORY_CSV)
+        st.markdown("### Snapshot uploads")
+        st.dataframe(hist.tail(20), use_container_width=True, hide_index=True)
