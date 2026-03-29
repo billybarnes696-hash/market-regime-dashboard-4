@@ -328,21 +328,27 @@ def compute_future_metrics(price: pd.Series, horizon: int):
     n = len(vals)
     if n < horizon + 1:
         idx = price.index
-        return pd.Series(np.nan, idx), pd.Series(np.nan, idx), pd.Series(np.nan, idx)
+        return pd.Series(np.nan, index=idx), pd.Series(np.nan, index=idx), pd.Series(np.nan, index=idx)
+
     idx = np.arange(n)
     window_idx = idx[:, None] + np.arange(1, horizon + 1)
     mask = window_idx >= n
-    win = np.where(mask, np.nan, vals[window_idx])
+    # Clip before indexing so NumPy never sees out-of-bounds indices.
+    safe_idx = np.clip(window_idx, 0, n - 1)
+    win = vals[safe_idx].astype(float)
+    win[mask] = np.nan
+
     base = vals[:, None]
     rets = win / base - 1
     end_ret = rets[:, -1]
     max_gain = np.nanmax(rets, axis=1)
     max_dd = np.nanmin(rets, axis=1)
+
     valid = n - horizon
     end_ret[valid:] = np.nan
     max_gain[valid:] = np.nan
     max_dd[valid:] = np.nan
-    return pd.Series(end_ret, price.index), pd.Series(max_gain, price.index), pd.Series(max_dd, price.index)
+    return pd.Series(end_ret, index=price.index), pd.Series(max_gain, index=price.index), pd.Series(max_dd, index=price.index)
 
 def build_outcomes(rsp_price: pd.Series) -> pd.DataFrame:
     out = pd.DataFrame(index=rsp_price.index)
@@ -819,6 +825,109 @@ def plot_symbol(hist_feat: pd.DataFrame, symbol: str):
     fig.update_layout(height=500, margin=dict(l=10, r=10, t=30, b=10), template="plotly_white")
     return fig
 
+
+
+# =============================
+# Historical backtest vs SPY / RSP buy & hold
+# =============================
+def _signal_to_exposure(sig: str, mode: str = "Long / Hold / Short") -> int:
+    if sig == "LONG":
+        return 1
+    if sig == "SHORT":
+        return -1 if mode == "Long / Hold / Short" else 0
+    return 0
+
+def run_historical_backtest(model: Dict[str, Any], daily_feat: pd.DataFrame, weekly_feat: pd.DataFrame) -> pd.DataFrame:
+    base = base_state_table(daily_feat).sort_values("date").reset_index(drop=True)
+    if base.empty:
+        return pd.DataFrame()
+    # benchmark series
+    piv = daily_feat.pivot(index="date", columns="symbol", values="close").sort_index()
+    base["spy_close"] = piv["SPY"].reindex(base["date"]).values if "SPY" in piv.columns else np.nan
+    base["rsp_close"] = piv["RSP"].reindex(base["date"]).values if "RSP" in piv.columns else base.get("rsp_close", np.nan)
+
+    # prepare weekly snapshots by date
+    weekly_snapshots = {}
+    if not weekly_feat.empty:
+        wk_feat = add_indicator_features(weekly_feat)
+        wk_wide = features_wide(wk_feat, ["close"]).reset_index()
+        for _, row in wk_wide.iterrows():
+            snap = {}
+            for sym in WEEKLY_FEATURES:
+                col = f"{sym}__close"
+                if col in wk_wide.columns:
+                    snap[sym] = safe_float(row.get(col, np.nan))
+            weekly_snapshots[pd.to_datetime(row["date"])] = snap
+
+    records = []
+    for i in range(1, len(base)):
+        cur = base.iloc[i].to_dict()
+        prev = base.iloc[i - 1].to_dict()
+
+        # state gates
+        state_scores = {state: evaluate_state(cur, model["states"][state]) for state in ["bounce", "repair", "regime", "fall"]}
+        _, band_totals = score_bands(cur, model.get("bands", {}))
+        improve = score_repair_improvement(cur, prev)
+        canary = current_canary_label(model, pd.to_datetime(cur["date"]))
+        cl_id, cl_name, cl_conf = predict_cluster(cur, model)
+
+        weekly_pass_frac = 0.0
+        if model.get("weekly", {}).get("singles") and weekly_snapshots:
+            eligible = [d for d in weekly_snapshots.keys() if d <= pd.to_datetime(cur["date"])]
+            if eligible:
+                wk_date = max(eligible)
+                wk_snapshot = weekly_snapshots[wk_date]
+                passes = [gate_pass(safe_float(wk_snapshot.get(g["feature"], np.nan)), g) for g in model["weekly"]["singles"]]
+                weekly_pass_frac = float(np.mean(passes)) if passes else 0.0
+
+        sig = classify_signal(state_scores, band_totals, canary, cl_name, cl_conf, weekly_pass_frac, improve)["signal"]
+        records.append({
+            "date": pd.to_datetime(cur["date"]),
+            "signal": sig,
+            "rsp_close": safe_float(cur.get("rsp_close", np.nan)),
+            "spy_close": safe_float(cur.get("spy_close", np.nan)),
+            "bounce_prob": state_scores["bounce"]["prob"],
+            "repair_prob": state_scores["repair"]["prob"],
+            "regime_prob": state_scores["regime"]["prob"],
+            "fall_prob": state_scores["fall"]["prob"],
+            "improve_score": improve["score"],
+        })
+    bt = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+    if bt.empty:
+        return bt
+    bt["rsp_ret"] = bt["rsp_close"].pct_change().fillna(0.0)
+    bt["spy_ret"] = bt["spy_close"].pct_change().fillna(0.0) if bt["spy_close"].notna().any() else np.nan
+    return bt
+
+def finalize_backtest_equity(bt: pd.DataFrame, mode: str = "Long / Hold / Short", switch_cost_bps: float = 2.0) -> pd.DataFrame:
+    out = bt.copy()
+    if out.empty:
+        return out
+    out["exposure"] = out["signal"].map(lambda s: _signal_to_exposure(s, mode)).astype(float)
+    out["position"] = out["exposure"].shift(1).fillna(0.0)
+    out["switch"] = out["position"].diff().abs().fillna(out["position"].abs())
+    cost = switch_cost_bps / 10000.0
+    out["strategy_ret"] = out["position"] * out["rsp_ret"] - out["switch"] * cost
+    out["equity_strategy"] = (1.0 + out["strategy_ret"]).cumprod()
+    out["equity_rsp"] = (1.0 + out["rsp_ret"].fillna(0.0)).cumprod()
+    if out["spy_ret"].notna().any():
+        out["equity_spy"] = (1.0 + out["spy_ret"].fillna(0.0)).cumprod()
+    else:
+        out["equity_spy"] = np.nan
+    return out
+
+def perf_summary(eq: pd.Series, rets: pd.Series) -> Dict[str, float]:
+    eq = pd.to_numeric(eq, errors="coerce").dropna()
+    rets = pd.to_numeric(rets, errors="coerce").dropna()
+    if eq.empty or rets.empty:
+        return {"total_return": np.nan, "cagr": np.nan, "max_dd": np.nan, "sharpe": np.nan}
+    total_return = float(eq.iloc[-1] - 1.0)
+    years = max(len(rets) / 252.0, 1e-9)
+    cagr = float(eq.iloc[-1] ** (1 / years) - 1) if eq.iloc[-1] > 0 else np.nan
+    dd = eq / eq.cummax() - 1.0
+    max_dd = float(dd.min())
+    sharpe = float((rets.mean() / rets.std()) * np.sqrt(252)) if rets.std() and not np.isnan(rets.std()) and rets.std() != 0 else np.nan
+    return {"total_return": total_return, "cagr": cagr, "max_dd": max_dd, "sharpe": sharpe}
 # =============================
 # App
 # =============================
@@ -855,6 +964,7 @@ def main():
         for p in [HIST_DAILY_PATH, HIST_WEEKLY_PATH, MODEL_PATH, UPLOAD_HISTORY_PATH]:
             if p.exists():
                 p.unlink()
+        st.session_state.pop("backtest_cache", None)
         st.sidebar.success("Saved model reset.")
 
     model = None if force_rebuild else load_model()
@@ -865,6 +975,7 @@ def main():
             with st.spinner("Building model from historical zip..."):
                 daily, weekly = parse_stockcharts_zip(hist_upload.read())
                 model = build_model_from_history(daily, weekly)
+            st.session_state.pop("backtest_cache", None)
             st.sidebar.success("Historical model built and saved.")
         except Exception as e:
             st.sidebar.error(f"Build failed: {e}")
@@ -943,7 +1054,7 @@ def main():
                 f'<span class="pill pill-blue">Weekly pass frac: {fmt_num(weekly_pass_frac,2)}</span>'
                 f'<span class="pill pill-blue">Cluster: {cl_name or "n/a"} {fmt_num(cl_conf,2) if cl_conf is not None else ""}</span>', unsafe_allow_html=True)
 
-    tabs = st.tabs(["Decision Dashboard", "Learned Gates", "History / Uploads"])
+    tabs = st.tabs(["Decision Dashboard", "Learned Gates", "Backtest vs SPY", "History / Uploads"])
 
     with tabs[0]:
         left, right = st.columns([1.25, 1])
@@ -1019,6 +1130,52 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tabs[2]:
+        st.markdown('<div class="soft-card"><div class="score-title">Historical backtest vs SPY / RSP buy & hold</div>', unsafe_allow_html=True)
+        mode = st.radio("Strategy mode", ["Long / Hold / Short", "Long / Hold"], horizontal=True)
+        switch_cost_bps = st.slider("Switch cost (bps)", 0.0, 25.0, 2.0, 0.5)
+        if "backtest_cache" not in st.session_state:
+            with st.spinner("Running historical signal backtest..."):
+                st.session_state["backtest_cache"] = run_historical_backtest(model, daily_feat, weekly_feat)
+        bt_raw = st.session_state["backtest_cache"]
+        if bt_raw.empty:
+            st.write("Backtest unavailable.")
+        else:
+            bt = finalize_backtest_equity(bt_raw, mode=mode, switch_cost_bps=switch_cost_bps)
+            ssum = perf_summary(bt["equity_strategy"], bt["strategy_ret"])
+            rspsum = perf_summary(bt["equity_rsp"], bt["rsp_ret"])
+            spysum = perf_summary(bt["equity_spy"], bt["spy_ret"]) if bt["spy_ret"].notna().any() else {"total_return": np.nan, "cagr": np.nan, "max_dd": np.nan, "sharpe": np.nan}
+
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                card("Strategy Total Return", f"{fmt_num(100*ssum['total_return'],1)}%", f"CAGR {fmt_num(100*ssum['cagr'],1)}% | MaxDD {fmt_num(100*ssum['max_dd'],1)}%")
+            with m2:
+                card("RSP Buy & Hold", f"{fmt_num(100*rspsum['total_return'],1)}%", f"CAGR {fmt_num(100*rspsum['cagr'],1)}% | MaxDD {fmt_num(100*rspsum['max_dd'],1)}%")
+            with m3:
+                bench_label = "SPY Buy & Hold" if bt["spy_ret"].notna().any() else "SPY unavailable"
+                bench_sub = f"CAGR {fmt_num(100*spysum['cagr'],1)}% | MaxDD {fmt_num(100*spysum['max_dd'],1)}%" if bt["spy_ret"].notna().any() else ""
+                card(bench_label, f"{fmt_num(100*spysum['total_return'],1)}%" if bt["spy_ret"].notna().any() else "n/a", bench_sub)
+
+            beat_spy = bt["equity_strategy"].iloc[-1] > bt["equity_spy"].iloc[-1] if bt["spy_ret"].notna().any() else False
+            beat_rsp = bt["equity_strategy"].iloc[-1] > bt["equity_rsp"].iloc[-1]
+            verdict = []
+            verdict.append("beats RSP buy & hold" if beat_rsp else "does not beat RSP buy & hold")
+            if bt["spy_ret"].notna().any():
+                verdict.append("beats SPY buy & hold" if beat_spy else "does not beat SPY buy & hold")
+            st.markdown(f"**Backtest verdict:** strategy {' and '.join(verdict)} over the available historical sample.")
+
+            fig_eq = go.Figure()
+            fig_eq.add_trace(go.Scatter(x=bt["date"], y=bt["equity_strategy"], name="Strategy", line=dict(width=2.5)))
+            fig_eq.add_trace(go.Scatter(x=bt["date"], y=bt["equity_rsp"], name="RSP Buy & Hold", line=dict(width=2.0)))
+            if bt["spy_ret"].notna().any():
+                fig_eq.add_trace(go.Scatter(x=bt["date"], y=bt["equity_spy"], name="SPY Buy & Hold", line=dict(width=2.0)))
+            fig_eq.update_layout(height=460, margin=dict(l=10, r=10, t=30, b=10), template="plotly_white")
+            st.plotly_chart(fig_eq, use_container_width=True)
+
+            show_cols = ["date", "signal", "position", "bounce_prob", "repair_prob", "regime_prob", "fall_prob", "improve_score", "strategy_ret"]
+            st.dataframe(bt[show_cols].tail(200), use_container_width=True, hide_index=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tabs[3]:
         hist = pd.read_csv(UPLOAD_HISTORY_PATH) if UPLOAD_HISTORY_PATH.exists() else pd.DataFrame()
         st.markdown('<div class="soft-card"><div class="score-title">History / Uploads</div>', unsafe_allow_html=True)
         st.write(f"Using saved historical gate model. Historical upload is not required again unless you want to refresh the model.")
