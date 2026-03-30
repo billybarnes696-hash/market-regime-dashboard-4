@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Breadth Sweet Spot Engine v5.0 - Quant Production Ultimate
+Breadth Sweet Spot Engine v6.0 - Quant Production Ultimate
 ==========================================================
 Production-grade market breadth analysis engine designed to beat buy-and-hold RSP.
 
-Features:
-- Empirical gate learning (lift/support scoring) + sweet spot bands
-- K-Means clustering with silhouette validation for regime detection
+Merges best qualities from all previous versions:
+- Empirical gate learning (lift/support scoring) from ultimate_final.py
+- Backtest vs RSP/SPY tab with equity curve comparison
+- Walk-forward validation & Monte Carlo robustness testing
+- Comprehensive risk metrics (Sharpe/Sortino/Calmar/VaR)
+- K-Means clustering with silhouette validation
 - Recovery momentum layer with normalized slope analysis
 - 7-ratio canary filter for signal confirmation
-- NYMO proxy governance (0.6×NYAD + 0.4×SPXADP) for intraday analysis
+- NYMO proxy governance (0.6×NYAD + 0.4×SPXADP)
 - TRIN/VIX support with proper inversion logic
 - LONG and SHORT signal frameworks
-- Walk-forward validation & Monte Carlo robustness testing
-- Comprehensive risk metrics: Sharpe, Sortino, Calmar, VaR, skew, kurtosis
-- RSP buy-and-hold comparison with statistical significance testing
+- Clean, maintainable code (~1400 lines)
 
 Author: Market Breadth Analysis Engine
-Version: 5.0.0 (Quant Production Ultimate)
+Version: 6.0.0 (Quant Production Ultimate)
 Last Updated: 2026-03-30
 """
 
@@ -27,8 +28,6 @@ import io
 import json
 import logging
 import math
-import re
-import sys
 import warnings
 import zipfile
 from dataclasses import dataclass, asdict
@@ -55,8 +54,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(Path(__file__).parent / 'breadth_engine_v5.log', mode='a', encoding='utf-8')
+        logging.StreamHandler(),
+        logging.FileHandler(Path(__file__).parent / 'breadth_engine_v6.log', mode='a', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -66,7 +65,7 @@ warnings.filterwarnings('ignore', category=(FutureWarning, UserWarning, RuntimeW
 # App Configuration
 # ==============================================================================
 st.set_page_config(
-    page_title="Breadth Sweet Spot Engine v5.0 | Ultimate",
+    page_title="Breadth Sweet Spot Engine v6.0 | Ultimate",
     layout="wide",
     page_icon="📈",
     initial_sidebar_state="expanded"
@@ -104,7 +103,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="main-title">
-<h1 style="margin:0;font-size:1.8rem;">📈 Breadth Sweet Spot Engine v5.0 | Ultimate</h1>
+<h1 style="margin:0;font-size:1.8rem;">📈 Breadth Sweet Spot Engine v6.0 | Ultimate</h1>
 <p style="margin:0.5rem 0 0 0;color:#98abd5;">Gate Learning + Sweet Spots + Clustering • Beats Buy & Hold RSP • Full Validation Suite</p>
 </div>
 """, unsafe_allow_html=True)
@@ -112,7 +111,7 @@ st.markdown("""
 # ==============================================================================
 # Constants (NO TRAILING SPACES)
 # ==============================================================================
-APP_DIR = Path("breadth_quant_store_v5")
+APP_DIR = Path("breadth_quant_store_v6")
 APP_DIR.mkdir(exist_ok=True)
 HIST_DAILY_PATH = APP_DIR / "daily_history.parquet"
 HIST_WEEKLY_PATH = APP_DIR / "weekly_history.parquet"
@@ -459,10 +458,9 @@ def learn_single_gates(df: pd.DataFrame, features: List[str], label: str, min_su
     gates = sorted(gates, key=lambda x: (x["score"], x["lift"], x["support"]), reverse=True)
     top, used = [], set()
     for g in gates:
-        key = g["feature"]
-        if key in used:
+        if g["feature"] in used:
             continue
-        used.add(key)
+        used.add(g["feature"])
         top.append(g)
         if len(top) >= 12:
             break
@@ -504,8 +502,7 @@ def learn_combo_gates(df: pd.DataFrame, label: str, singles: List[dict], min_sup
                 "base_rate": base, "lift": hit / base if base > 0 else np.nan, "score": score
             })
     
-    combos = sorted(combos, key=lambda x: (x["score"], x["lift"], x["support"]), reverse=True)
-    return combos[:6]
+    return sorted(combos, key=lambda x: (x["score"], x["lift"], x["support"]), reverse=True)[:6]
 
 def gate_pass(cur: float, gate: dict) -> bool:
     if pd.isna(cur):
@@ -890,7 +887,7 @@ def classify_signal(state_scores: Dict[str, Any], band_totals: Dict[str, float],
     return {"signal": signal, "reasons": reasons, "bounce_prob": bounce["prob"], "repair_prob": repair["prob"], "regime_prob": regime["prob"], "fall_prob": fall["prob"]}
 
 # ==============================================================================
-# Risk Metrics
+# Risk Metrics & Validation
 # ==============================================================================
 def calculate_risk_metrics(equity_curve: pd.Series, rf: float = 0.02) -> Dict[str, float]:
     returns = equity_curve.pct_change().dropna()
@@ -1071,8 +1068,54 @@ def load_model() -> Optional[Dict[str, Any]]:
 # ==============================================================================
 # Main App
 # ==============================================================================
+@st.cache_resource
+def get_baseline_manager():
+    class BaselineManager:
+        def __init__(self, storage_path=BASELINE_TIMESTAMP_PATH):
+            self.storage_path = storage_path
+            self.baseline = self._load_baseline()
+        
+        def _load_baseline(self):
+            if not self.storage_path.exists():
+                return None
+            try:
+                ts_str = self.storage_path.read_text().strip()
+                return pd.to_datetime(ts_str) if ts_str else None
+            except:
+                return None
+        
+        def _save_baseline(self, ts):
+            try:
+                self.storage_path.write_text(ts.isoformat())
+                return True
+            except:
+                return False
+        
+        def determine_mode(self, new_timestamp):
+            if self.baseline is None:
+                self._save_baseline(new_timestamp)
+                self.baseline = new_timestamp
+                return "Sequential"
+            if new_timestamp > self.baseline:
+                self._save_baseline(new_timestamp)
+                self.baseline = new_timestamp
+                return "Sequential"
+            elif new_timestamp == self.baseline:
+                return "Update"
+            else:
+                return "Historical"
+        
+        def get_baseline(self):
+            return self.baseline
+        
+        def reset(self):
+            if self.storage_path.exists():
+                self.storage_path.unlink()
+            self.baseline = None
+    return BaselineManager()
+
 def main():
-    logger.info("Breadth Sweet Spot Engine v5.0 starting")
+    logger.info("Breadth Sweet Spot Engine v6.0 starting")
     
     with st.sidebar:
         st.header("⚙️ Configuration")
@@ -1175,16 +1218,60 @@ def main():
     
     signal = classify_signal(state_scores, band_totals, canary, cl_name, recovery_score)
     
-    render_status_bar(phase, nymo_eff)
+    # Status Bar
+    st.markdown(f"""
+    <div class="status-bar">
+        <div><strong>Phase:</strong> {phase.value}</div>
+        <div><strong>NYMO:</strong> {fmt_num(nymo_eff['value'], 1)} ({nymo_eff['state']})</div>
+        <div><strong>Mode:</strong> {'Proxy' if nymo_eff.get('state') != 'Official' else 'Official'}</div>
+    </div>
+    """, unsafe_allow_html=True)
     
+    # Score Cards
     c1, c2, c3, c4 = st.columns(4)
-    with c1: render_score_card("Bounce", state_scores["bounce"]["prob"] * 100 if pd.notna(state_scores["bounce"]["prob"]) else 0, 100)
-    with c2: render_score_card("Repair", state_scores["repair"]["prob"] * 100 if pd.notna(state_scores["repair"]["prob"]) else 0, 100)
-    with c3: render_score_card("Regime", state_scores["regime"]["prob"] * 100 if pd.notna(state_scores["regime"]["prob"]) else 0, 100)
-    with c4: render_score_card("Canary", canary_conf, 100)
+    with c1:
+        st.markdown(f"""
+        <div class="soft-card score-card">
+            <div class="score-title">Bounce</div>
+            <div class="score-value">{state_scores['bounce']['prob']*100 if pd.notna(state_scores['bounce']['prob']) else 0:.0f}%</div>
+            <div class="score-bar"><div class="score-fill fill-green" style="width:{state_scores['bounce']['prob']*100 if pd.notna(state_scores['bounce']['prob']) else 0:.0f}%"></div></div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""
+        <div class="soft-card score-card">
+            <div class="score-title">Repair</div>
+            <div class="score-value">{state_scores['repair']['prob']*100 if pd.notna(state_scores['repair']['prob']) else 0:.0f}%</div>
+            <div class="score-bar"><div class="score-fill fill-blue" style="width:{state_scores['repair']['prob']*100 if pd.notna(state_scores['repair']['prob']) else 0:.0f}%"></div></div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"""
+        <div class="soft-card score-card">
+            <div class="score-title">Regime</div>
+            <div class="score-value">{state_scores['regime']['prob']*100 if pd.notna(state_scores['regime']['prob']) else 0:.0f}%</div>
+            <div class="score-bar"><div class="score-fill fill-yellow" style="width:{state_scores['regime']['prob']*100 if pd.notna(state_scores['regime']['prob']) else 0:.0f}%"></div></div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"""
+        <div class="soft-card score-card">
+            <div class="score-title">Canary</div>
+            <div class="score-value">{canary_conf:.0f}%</div>
+            <div class="score-bar"><div class="score-fill fill-blue" style="width:{canary_conf:.0f}%"></div></div>
+        </div>
+        """, unsafe_allow_html=True)
     
-    render_signal_box(signal["signal"], "; ".join(signal["reasons"][:3]))
+    # Signal Box
+    cls = {"LONG": "signal-long", "SHORT": "signal-short"}.get(signal["signal"], "signal-hold")
+    st.markdown(f"""
+    <div class="{cls}">
+        <h3 style="margin:0 0 0.5rem 0;">📌 Daily Verdict: {signal["signal"]}</h3>
+        <p style="margin:0;color:var(--text);">{'; '.join(signal['reasons'][:3])}</p>
+    </div>
+    """, unsafe_allow_html=True)
     
+    # Tabs
     tab1, tab2, tab3 = st.tabs(["📊 Decision Dashboard", "📈 Backtest vs RSP", "🔍 Model Explorer"])
     
     with tab1:
@@ -1274,36 +1361,11 @@ def main():
         if singles:
             sg = pd.DataFrame([{**g, "gate": f"{g['feature']} {'>=' if g['direction']=='gte' else '<='} {round(g['threshold'],3)}"} for g in singles])
             st.dataframe(sg[["gate", "support", "hit_rate", "base_rate", "lift"]].round(3), use_container_width=True, hide_index=True)
-
-def render_status_bar(phase, nymo_eff):
-    st.markdown(f"""
-    <div class="status-bar">
-        <div><strong>Phase:</strong> {phase.value}</div>
-        <div><strong>NYMO:</strong> {fmt_num(nymo_eff['value'], 1)} ({nymo_eff['state']})</div>
-        <div><strong>Mode:</strong> {'Proxy' if nymo_eff.get('state') != 'Official' else 'Official'}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-def render_score_card(title: str, value: float, max_score: float):
-    hex_color, fill_class = score_color(value, max_score)
-    width = max(0, min(100, int(round(100 * value / max_score)))) if max_score else 0
     
-    st.markdown(f"""
-    <div class="soft-card score-card">
-        <div class="score-title">{title}</div>
-        <div class="score-value">{value:.1f}</div>
-        <div class="score-bar"><div class="score-fill {fill_class}" style="width:{width}%"></div></div>
-    </div>
-    """, unsafe_allow_html=True)
-
-def render_signal_box(verdict: str, text: str):
-    cls = {"LONG": "signal-long", "SHORT": "signal-short"}.get(verdict, "signal-hold")
-    st.markdown(f"""
-    <div class="{cls}">
-        <h3 style="margin:0 0 0.5rem 0;">📌 Daily Verdict: {verdict}</h3>
-        <p style="margin:0;color:var(--text);">{text}</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("---")
+    st.caption(f"Breadth Sweet Spot Engine v6.0.0 | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    logger.info("Analysis complete")
 
 if __name__ == "__main__":
     try:
