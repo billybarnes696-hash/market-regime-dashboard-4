@@ -696,37 +696,59 @@ def build_model_from_history_bytes(file_bytes: bytes) -> Dict[str, Any]:
     daily_feat = add_indicator_features(daily)
     weekly_feat = add_indicator_features(weekly) if not weekly.empty else weekly.copy()
 
-    piv = daily_feat.pivot(index="date", columns="symbol", values="close")
-    if "RSP" not in piv.columns:
+    close_piv = daily_feat.pivot(index="date", columns="symbol", values="close").sort_index()
+    if "RSP" not in close_piv.columns:
         raise ValueError("RSP daily history is required")
 
-    outcomes = build_outcomes(piv["RSP"].dropna())
-    base = piv.join(outcomes, how="inner").dropna()
-    features = [c for c in base.columns if c not in ["RSP"] + [f"{x}_success" for x in OUTCOME_DEFS.keys()]]
+    # Include derived features needed by the hard-gate engine, especially %B.
+    pctb_piv = daily_feat.pivot(index="date", columns="symbol", values="pct_b20").sort_index()
+    pctb_piv.columns = [f"{c}_%B" for c in pctb_piv.columns]
+
+    base = close_piv.join(pctb_piv, how="left")
+
+    outcomes = build_outcomes(close_piv["RSP"].dropna())
+    base = base.join(outcomes, how="inner").sort_index()
+
+    outcome_cols = [f"{x}_success" for x in OUTCOME_DEFS.keys()]
+    features = [c for c in base.columns if c not in ["RSP"] + outcome_cols]
     features = [c for c in features if base[c].notna().sum() >= MIN_GATE_SUPPORT * 2]
 
     learned: Dict[str, Any] = {"states": {}, "bands": {}, "meta": {"rows": int(len(base))}}
     for state in ["bounce", "repair", "regime", "fall"]:
         singles = learn_single_gates(base, features, state)
         combos = learn_combo_gates(base, state, singles)
-        learned["states"][state] = {"singles": singles, "combos": combos, "base_rate": float(base[f"{state}_success"].mean())}
+        learned["states"][state] = {
+            "singles": singles,
+            "combos": combos,
+            "base_rate": float(base[f"{state}_success"].mean()),
+        }
         if state != "fall":
             learned["bands"][state] = summarize_bands(base, state)
 
-    cluster_base = base.dropna(subset=KEY_FEATURES).copy()
-    cluster_stats, cluster_artifacts = build_clusters(cluster_base, KEY_FEATURES, n_clusters=6)
-    learned["clusters"] = {
-        "mean": cluster_artifacts.scaler_mean,
-        "scale": cluster_artifacts.scaler_scale,
-        "features": cluster_artifacts.features,
-        "centroids": cluster_artifacts.centroids,
-        "names": cluster_artifacts.cluster_names,
-        "silhouette": cluster_artifacts.silhouette_score,
-        "stats": cluster_stats.to_dict(orient="records"),
-    }
+    cluster_features = [f for f in KEY_FEATURES if f in base.columns]
+    if len(cluster_features) >= 3:
+        cluster_base = base.dropna(subset=cluster_features).copy()
+        if not cluster_base.empty:
+            cluster_stats, cluster_artifacts = build_clusters(cluster_base, cluster_features, n_clusters=6)
+            learned["clusters"] = {
+                "mean": cluster_artifacts.scaler_mean,
+                "scale": cluster_artifacts.scaler_scale,
+                "features": cluster_artifacts.features,
+                "centroids": cluster_artifacts.centroids,
+                "names": cluster_artifacts.cluster_names,
+                "silhouette": cluster_artifacts.silhouette_score,
+                "stats": cluster_stats.to_dict(orient="records"),
+            }
+        else:
+            learned["clusters"] = {}
+    else:
+        learned["clusters"] = {}
 
     canary_hist = build_canary_from_history(daily_feat)
-    learned["canary_hist"] = canary_hist.reset_index().rename(columns={"index": "date"}).to_dict(orient="records") if not canary_hist.empty else []
+    learned["canary_hist"] = (
+        canary_hist.reset_index().rename(columns={"index": "date"}).to_dict(orient="records")
+        if not canary_hist.empty else []
+    )
 
     daily_feat.to_parquet(HIST_DAILY_PATH, index=False)
     if not weekly_feat.empty:
