@@ -696,39 +696,32 @@ def build_model_from_history_bytes(file_bytes: bytes) -> Dict[str, Any]:
     daily_feat = add_indicator_features(daily)
     weekly_feat = add_indicator_features(weekly) if not weekly.empty else weekly.copy()
 
-    close_piv = daily_feat.pivot(index="date", columns="symbol", values="close").sort_index()
-    if "RSP" not in close_piv.columns:
+    piv_close = daily_feat.pivot(index="date", columns="symbol", values="close")
+    piv_pctb = daily_feat.pivot(index="date", columns="symbol", values="pct_b20")
+    piv_pctb.columns = [f"{c}_%B" for c in piv_pctb.columns]
+    base_features = pd.concat([piv_close, piv_pctb], axis=1).sort_index()
+    if "RSP" not in piv_close.columns:
         raise ValueError("RSP daily history is required")
 
-    # Include derived features needed by the hard-gate engine, especially %B.
-    pctb_piv = daily_feat.pivot(index="date", columns="symbol", values="pct_b20").sort_index()
-    pctb_piv.columns = [f"{c}_%B" for c in pctb_piv.columns]
-
-    base = close_piv.join(pctb_piv, how="left")
-
-    outcomes = build_outcomes(close_piv["RSP"].dropna())
-    base = base.join(outcomes, how="inner").sort_index()
-
-    outcome_cols = [f"{x}_success" for x in OUTCOME_DEFS.keys()]
-    features = [c for c in base.columns if c not in ["RSP"] + outcome_cols]
+    outcomes = build_outcomes(piv_close["RSP"].dropna())
+    base = base_features.join(outcomes, how="inner")
+    base = base.dropna(subset=["RSP"]).copy()
+    features = [c for c in base.columns if c not in ["RSP"] + [f"{x}_success" for x in OUTCOME_DEFS.keys()]]
     features = [c for c in features if base[c].notna().sum() >= MIN_GATE_SUPPORT * 2]
 
     learned: Dict[str, Any] = {"states": {}, "bands": {}, "meta": {"rows": int(len(base))}}
     for state in ["bounce", "repair", "regime", "fall"]:
         singles = learn_single_gates(base, features, state)
         combos = learn_combo_gates(base, state, singles)
-        learned["states"][state] = {
-            "singles": singles,
-            "combos": combos,
-            "base_rate": float(base[f"{state}_success"].mean()),
-        }
+        learned["states"][state] = {"singles": singles, "combos": combos, "base_rate": float(base[f"{state}_success"].mean())}
         if state != "fall":
             learned["bands"][state] = summarize_bands(base, state)
 
     cluster_features = [f for f in KEY_FEATURES if f in base.columns]
-    if len(cluster_features) >= 3:
+    learned["clusters"] = None
+    if len(cluster_features) >= 4:
         cluster_base = base.dropna(subset=cluster_features).copy()
-        if not cluster_base.empty:
+        if len(cluster_base) >= 60:
             cluster_stats, cluster_artifacts = build_clusters(cluster_base, cluster_features, n_clusters=6)
             learned["clusters"] = {
                 "mean": cluster_artifacts.scaler_mean,
@@ -739,16 +732,9 @@ def build_model_from_history_bytes(file_bytes: bytes) -> Dict[str, Any]:
                 "silhouette": cluster_artifacts.silhouette_score,
                 "stats": cluster_stats.to_dict(orient="records"),
             }
-        else:
-            learned["clusters"] = {}
-    else:
-        learned["clusters"] = {}
 
     canary_hist = build_canary_from_history(daily_feat)
-    learned["canary_hist"] = (
-        canary_hist.reset_index().rename(columns={"index": "date"}).to_dict(orient="records")
-        if not canary_hist.empty else []
-    )
+    learned["canary_hist"] = canary_hist.reset_index().rename(columns={"index": "date"}).to_dict(orient="records") if not canary_hist.empty else []
 
     daily_feat.to_parquet(HIST_DAILY_PATH, index=False)
     if not weekly_feat.empty:
@@ -1042,6 +1028,7 @@ def main():
     nymo_eff = proxy_nymo(snapshot, prev_snapshot)
     verdict = classify_signal(state_scores, canary, cluster_name, recovery["recovery_score"] if pd.notna(recovery["recovery_score"]) else 0)
     hold_setup = build_hold_setup(snapshot, state_scores)
+    range_df = build_range_map(snapshot, model.get("bands", {}))
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1055,7 +1042,7 @@ def main():
 
     render_signal_box(verdict["signal"], " | ".join(verdict["reasons"][:3]))
 
-    tab1, tab2, tab3 = st.tabs(["Decision Dashboard", "Backtest vs Buy & Hold", "Diagnostics"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Decision Dashboard", "Range Map / State Ladder", "Backtest vs Buy & Hold", "Diagnostics"])
 
     with tab1:
         a, b = st.columns([1.2, 1])
