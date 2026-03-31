@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Breadth Quant Engine Ultimate v8
-Adds oscillator-aware repair logic on top of historical gates/range map.
+Breadth Quant Engine Ultimate v9
+- Historical gates + range map + oscillator-aware repair matrix
+- Holistic TSI (customizable) with simple tradable gauge
+- Backtest vs RSP / SPY using holistic TSI signals
 """
+
 from __future__ import annotations
 
 import io
@@ -22,24 +25,32 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
+
 # -----------------------------
 # App config / style
 # -----------------------------
-st.set_page_config(page_title="Breadth Quant Engine Ultimate v8", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Breadth Quant Engine Ultimate v9", layout="wide", page_icon="📈")
 
 CUSTOM_CSS = """
 <style>
-:root{--bg:#0b1020;--panel:#111936;--text:#ecf2ff;--muted:#98abd5;--green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--blue:#38bdf8;}
-.block-container{padding-top:1rem;padding-bottom:2rem;}
+:root{
+  --bg:#0b1020;--panel:#111936;--text:#ecf2ff;--muted:#98abd5;
+  --green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--blue:#38bdf8;
+  --soft-green:rgba(34,197,94,.12);--soft-yellow:rgba(245,158,11,.12);--soft-red:rgba(239,68,68,.12);
+}
+.block-container{padding-top:1rem;padding-bottom:2rem;max-width:1500px;}
 .main-title{padding:1rem 1.2rem;border-radius:18px;background:linear-gradient(135deg, rgba(56,189,248,.18), rgba(167,139,250,.18));border:1px solid rgba(148,163,184,.22);margin-bottom:1rem;}
 .soft-card{background:linear-gradient(180deg, rgba(17,25,54,.96), rgba(10,17,38,.98));border:1px solid rgba(148,163,184,.24);border-radius:18px;padding:1rem;box-shadow:0 10px 35px rgba(0,0,0,.22);margin-bottom:1rem;}
 .score-title{color:#bcd0ff;font-size:1.02rem;font-weight:800;}
-.score-value{font-size:2.7rem;font-weight:950;color:#fff;margin:.35rem 0;}
-.pill{display:inline-block;padding:.3rem .6rem;border-radius:999px;font-size:.82rem;font-weight:700;border:1px solid rgba(255,255,255,.12);margin-right:.35rem;}
+.score-value{font-size:2.2rem;font-weight:950;color:#fff;margin:.35rem 0;}
+.score-value-sm{font-size:1.35rem;font-weight:900;color:#fff;margin:.2rem 0;}
+.small-muted{color:#93a4cc;font-size:.88rem;}
+.tiny-muted{color:#93a4cc;font-size:.78rem;}
+.pill{display:inline-block;padding:.3rem .6rem;border-radius:999px;font-size:.82rem;font-weight:700;border:1px solid rgba(255,255,255,.12);margin-right:.35rem;margin-bottom:.25rem;}
 .pill-green{background:rgba(34,197,94,.16);color:#bbf7d0;}
 .pill-yellow{background:rgba(245,158,11,.16);color:#fde68a;}
 .pill-red{background:rgba(239,68,68,.16);color:#fecaca;}
-.small-muted{color:#93a4cc;font-size:.88rem;}
+.pill-blue{background:rgba(56,189,248,.16);color:#c6f1ff;}
 .setup-line{padding:.45rem .55rem;border-radius:10px;margin:.28rem 0;border:1px solid rgba(255,255,255,.08);}
 .setup-pass{background:rgba(34,197,94,.10);}
 .setup-near{background:rgba(245,158,11,.10);}
@@ -48,20 +59,27 @@ CUSTOM_CSS = """
 .fill-green{height:100%;background:linear-gradient(90deg,#22c55e,#4ade80);}
 .fill-yellow{height:100%;background:linear-gradient(90deg,#f59e0b,#fbbf24);}
 .fill-red{height:100%;background:linear-gradient(90deg,#ef4444,#f87171);}
+.gauge-wrap{padding:.25rem 0 .1rem 0;}
+.gauge-track{height:22px;border-radius:999px;background:linear-gradient(90deg,#ef4444 0%, #f59e0b 35%, #94a3b8 50%, #f59e0b 65%, #22c55e 100%);position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.08);}
+.gauge-marker{position:absolute;top:-3px;width:10px;height:28px;border-radius:8px;background:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.15),0 2px 12px rgba(255,255,255,.3);}
+.kpi-box{padding:.75rem;border-radius:14px;border:1px solid rgba(148,163,184,.18);background:rgba(255,255,255,.03);}
+.state-green{background:var(--soft-green);}
+.state-yellow{background:var(--soft-yellow);}
+.state-red{background:var(--soft-red);}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown("""
 <div class='main-title'>
-  <div style='font-size:1.7rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v8</div>
-  <div class='small-muted'>Historical gates + range map + oscillator-aware repair matrix + practical trade setup parameters.</div>
+  <div style='font-size:1.8rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v9</div>
+  <div class='small-muted'>Historical gates + range map + oscillator-aware repair matrix + holistic TSI + backtest.</div>
 </div>
 """, unsafe_allow_html=True)
 
 # -----------------------------
 # Paths / constants
 # -----------------------------
-APP_DIR = Path("breadth_quant_store_v8")
+APP_DIR = Path("breadth_quant_store_v9")
 APP_DIR.mkdir(exist_ok=True)
 HIST_DAILY_PATH = APP_DIR / "daily_history.parquet"
 HIST_WEEKLY_PATH = APP_DIR / "weekly_history.parquet"
@@ -71,7 +89,7 @@ KEY_FEATURES = [
     "$BPSPX", "$BPSPX_%B", "$BPNYA", "$OEXA200R", "$SPXA50R", "$NYMO", "$NYSI",
     "$CPCE", "$NYHL", "$NYAD", "$SPXADP", "$TRIN", "$VIX", "RSP:SPY"
 ]
-INVERSE_INDICATORS = {"$TRIN", "$VIX", "$CPCE"}
+INVERSE_INDICATORS = {"$TRIN", "$VIX", "$CPCE", "VXX", "SPXS:SVOL"}
 STATE_ORDER = ["washout", "bounce", "repair", "regime", "overheating"]
 RANGE_FEATURES = ["$BPSPX", "$BPSPX_%B", "$BPNYA", "$OEXA200R", "$SPXA50R", "$NYMO", "$NYSI", "$CPCE", "$NYHL"]
 OSC_FEATURES = ["$BPSPX", "$SPXA50R", "$NYMO", "$NYSI", "$BPNYA", "$OEXA200R", "$NYHL"]
@@ -89,13 +107,31 @@ CANARY_WEIGHTS = {
 SYMBOL_MAP = {
     "rsp": "RSP", "ursp": "URSP", "spy": "SPY", "vxx": "VXX",
     "_bpspx": "$BPSPX", "bpspx": "$BPSPX", "_bpnya": "$BPNYA", "bpnya": "$BPNYA",
+    "_oexa50r": "$OEXA50R", "oexa50r": "$OEXA50R", "_oexa150r": "$OEXA150R", "oexa150r": "$OEXA150R",
     "_oexa200r": "$OEXA200R", "oexa200r": "$OEXA200R", "_spxa50r": "$SPXA50R", "spxa50r": "$SPXA50R",
     "_nymo": "$NYMO", "nymo": "$NYMO", "_nysi": "$NYSI", "nysi": "$NYSI",
     "_cpce": "$CPCE", "cpce": "$CPCE", "_nyhl": "$NYHL", "nyhl": "$NYHL",
     "_nyad": "$NYAD", "nyad": "$NYAD", "_spxadp": "$SPXADP", "spxadp": "$SPXADP",
     "_trin": "$TRIN", "trin": "$TRIN", "_vix": "$VIX", "vix": "$VIX",
-    "hyg_ief": "HYG:IEF", "rsp_spy": "RSP:SPY", "smh_spy": "SMH:SPY",
+    "hyg_ief": "HYG:IEF", "hyg_tlt": "HYG:TLT", "rsp_spy": "RSP:SPY", "smh_spy": "SMH:SPY",
     "iwm_spy": "IWM:SPY", "xlf_spy": "XLF:SPY", "spxs_svol": "SPXS:SVOL",
+}
+
+TSI_BUCKETS = {
+    "breadth": [
+        "$BPSPX", "$BPNYA", "$SPXA50R", "$OEXA50R", "$OEXA150R", "$OEXA200R",
+        "$NYMO", "$NYSI", "$NYHL", "$NYAD", "$SPXADP"
+    ],
+    "leadership": ["RSP", "SPY", "RSP:SPY", "SMH:SPY", "IWM:SPY", "XLF:SPY", "HYG:IEF", "HYG:TLT"],
+    "risk": ["$VIX", "VXX", "$TRIN", "$CPCE", "SPXS:SVOL"],
+}
+TSI_BUCKET_WEIGHTS = {"breadth": 0.50, "leadership": 0.30, "risk": 0.20}
+TSI_COMPONENT_WEIGHTS = {
+    "$BPSPX": 1.25, "$BPNYA": 1.00, "$SPXA50R": 1.25, "$OEXA50R": 0.75, "$OEXA150R": 0.65, "$OEXA200R": 0.70,
+    "$NYMO": 1.20, "$NYSI": 1.00, "$NYHL": 0.80, "$NYAD": 0.85, "$SPXADP": 0.85,
+    "RSP": 0.90, "SPY": 0.70, "RSP:SPY": 1.00, "SMH:SPY": 0.85, "IWM:SPY": 0.75, "XLF:SPY": 0.65,
+    "HYG:IEF": 0.90, "HYG:TLT": 0.70,
+    "$VIX": 1.00, "VXX": 0.90, "$TRIN": 0.80, "$CPCE": 0.80, "SPXS:SVOL": 1.00
 }
 
 # -----------------------------
@@ -135,20 +171,22 @@ def load_json(path: Path, default: Any) -> Any:
 # Indicators
 # -----------------------------
 def ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
+    return pd.to_numeric(series, errors="coerce").ewm(span=span, adjust=False).mean()
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    series = pd.to_numeric(series, errors="coerce")
     delta = series.diff()
     up = delta.clip(lower=0)
     down = -delta.clip(upper=0)
-    ma_up = up.ewm(alpha=1/period, adjust=False).mean()
-    ma_down = down.ewm(alpha=1/period, adjust=False).mean()
+    ma_up = up.ewm(alpha=1 / period, adjust=False).mean()
+    ma_down = down.ewm(alpha=1 / period, adjust=False).mean()
     rs = ma_up / ma_down.replace(0, np.nan)
     return (100 - (100 / (1 + rs))).fillna(50)
 
 
 def percent_b(series: pd.Series, window: int = 20, num_std: float = 2.0) -> pd.Series:
+    series = pd.to_numeric(series, errors="coerce")
     ma = series.rolling(window).mean()
     std = series.rolling(window).std()
     upper = ma + num_std * std
@@ -164,6 +202,7 @@ def macd_hist(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
 
 
 def stoch_from_close(close: pd.Series, length: int = 14, smoothk: int = 3) -> pd.Series:
+    close = pd.to_numeric(close, errors="coerce")
     lo = close.rolling(length).min()
     hi = close.rolling(length).max()
     denom = (hi - lo).replace(0, np.nan)
@@ -172,10 +211,24 @@ def stoch_from_close(close: pd.Series, length: int = 14, smoothk: int = 3) -> pd
 
 
 def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
+    high = pd.to_numeric(high, errors="coerce")
+    low = pd.to_numeric(low, errors="coerce")
+    close = pd.to_numeric(close, errors="coerce")
     tp = (high + low + close) / 3
     sma = tp.rolling(period).mean()
     mad = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
     return (tp - sma) / (0.015 * mad.replace(0, np.nan))
+
+
+def true_strength_index(series: pd.Series, long_len: int = 25, short_len: int = 13, signal_len: int = 7) -> Tuple[pd.Series, pd.Series]:
+    series = pd.to_numeric(series, errors="coerce")
+    m = series.diff()
+    abs_m = m.abs()
+    double_smoothed_m = ema(ema(m, long_len), short_len)
+    double_smoothed_abs = ema(ema(abs_m, long_len), short_len)
+    tsi = 100 * (double_smoothed_m / double_smoothed_abs.replace(0, np.nan))
+    signal = ema(tsi, signal_len)
+    return tsi, signal
 
 
 def add_indicator_features(hist: pd.DataFrame) -> pd.DataFrame:
@@ -196,6 +249,7 @@ def add_indicator_features(hist: pd.DataFrame) -> pd.DataFrame:
         out.append(g)
     return pd.concat(out, ignore_index=True)
 
+
 # -----------------------------
 # Parsing
 # -----------------------------
@@ -215,7 +269,16 @@ def parse_stockcharts_csv(content: bytes) -> pd.DataFrame:
         nums = [safe_float(x) for x in parts[1:6]]
         if all(pd.isna(x) for x in nums[:4]):
             continue
-        rows.append({"date": dt, "open": nums[0], "high": nums[1], "low": nums[2], "close": nums[3], "volume": nums[4]})
+        rows.append(
+            {
+                "date": dt,
+                "open": nums[0],
+                "high": nums[1],
+                "low": nums[2],
+                "close": nums[3],
+                "volume": nums[4],
+            }
+        )
     if not rows:
         raise ValueError("No rows parsed from StockCharts CSV")
     return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
@@ -224,7 +287,12 @@ def parse_stockcharts_csv(content: bytes) -> pd.DataFrame:
 def symbol_from_filename(name: str) -> Tuple[str, str]:
     stem = Path(name).stem.strip().lower()
     timeframe = "weekly" if stem.endswith("w") or stem.endswith("_w") else "daily"
-    stem = stem.replace("w", "").replace("_w", "").strip("_")
+    if timeframe == "weekly":
+        if stem.endswith("_w"):
+            stem = stem[:-2]
+        elif stem.endswith("w"):
+            stem = stem[:-1]
+    stem = stem.strip("_")
     sym = SYMBOL_MAP.get(stem, stem.upper())
     return sym, timeframe
 
@@ -246,7 +314,11 @@ def parse_stockcharts_zip(file_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame
     if not daily:
         raise ValueError("No daily CSV parsed from ZIP")
     daily_df = pd.concat(daily, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
-    weekly_df = pd.concat(weekly, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True) if weekly else pd.DataFrame(columns=daily_df.columns)
+    weekly_df = (
+        pd.concat(weekly, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
+        if weekly
+        else pd.DataFrame(columns=daily_df.columns)
+    )
     return daily_df, weekly_df
 
 
@@ -259,6 +331,7 @@ def parse_snapshot_csv(file_bytes: bytes) -> pd.DataFrame:
         raise ValueError("Snapshot must include close-like column")
     out = pd.DataFrame({"symbol": df["Symbol"].astype(str).str.strip(), "close": pd.to_numeric(df[close_col], errors="coerce")})
     return out.dropna(subset=["close"])
+
 
 # -----------------------------
 # Model helpers
@@ -303,6 +376,7 @@ def build_outcomes(rsp_price: pd.Series) -> pd.DataFrame:
 
 
 def ratio_indicator_score(close: pd.Series) -> pd.Series:
+    close = pd.to_numeric(close, errors="coerce")
     if close.dropna().shape[0] < 220:
         return pd.Series(dtype=float)
     mh = macd_hist(close)
@@ -382,7 +456,7 @@ def learn_single_gates(df: pd.DataFrame, features: List[str], label: str, min_su
                 if hit <= base:
                     continue
                 score = (hit - base) * math.sqrt(support)
-                gates.append({"feature": feat, "direction": direction, "threshold": thr, "support": support, "hit_rate": hit, "base_rate": base, "lift": hit/base if base > 0 else np.nan, "score": score})
+                gates.append({"feature": feat, "direction": direction, "threshold": thr, "support": support, "hit_rate": hit, "base_rate": base, "lift": hit / base if base > 0 else np.nan, "score": score})
     gates = sorted(gates, key=lambda x: (x["score"], x["lift"], x["support"]), reverse=True)
     top, used = [], set()
     for g in gates:
@@ -416,7 +490,7 @@ def learn_combo_gates(df: pd.DataFrame, label: str, singles: List[dict], min_sup
             if hit <= base:
                 continue
             score = (hit - base) * math.sqrt(support)
-            combos.append({"gates": [g1, g2], "support": support, "hit_rate": hit, "base_rate": base, "lift": hit/base if base > 0 else np.nan, "score": score})
+            combos.append({"gates": [g1, g2], "support": support, "hit_rate": hit, "base_rate": base, "lift": hit / base if base > 0 else np.nan, "score": score})
     return sorted(combos, key=lambda x: (x["score"], x["lift"], x["support"]), reverse=True)[:6]
 
 
@@ -439,6 +513,17 @@ def summarize_bands(df: pd.DataFrame, label: str) -> Dict[str, Dict[str, float]]
     return res
 
 
+def band_distance_score(x: float, q25: float, med: float, q75: float) -> float:
+    if pd.isna(x) or pd.isna(q25) or pd.isna(med) or pd.isna(q75):
+        return np.nan
+    iqr = max(abs(q75 - q25), 1e-6)
+    if q25 <= x <= q75:
+        d = abs(x - med) / iqr
+        return max(0.72, 1.0 - 0.28 * d)
+    d = min(abs(x - med) / iqr, 3.0)
+    return max(0.0, 0.72 - 0.24 * (d - 1.0))
+
+
 def score_bands(snapshot: Dict[str, float], bands: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[str, float]]:
     rows, totals = [], {}
     for label in ["bounce", "repair", "regime"]:
@@ -455,17 +540,6 @@ def score_bands(snapshot: Dict[str, float], bands: Dict[str, Any]) -> Tuple[pd.D
                 vals.append(sc)
         totals[label] = 100 * np.mean(vals) if vals else np.nan
     return pd.DataFrame(rows), totals
-
-
-def band_distance_score(x: float, q25: float, med: float, q75: float) -> float:
-    if pd.isna(x) or pd.isna(q25) or pd.isna(med) or pd.isna(q75):
-        return np.nan
-    iqr = max(abs(q75 - q25), 1e-6)
-    if q25 <= x <= q75:
-        d = abs(x - med) / iqr
-        return max(0.72, 1.0 - 0.28 * d)
-    d = min(abs(x - med) / iqr, 3.0)
-    return max(0.0, 0.72 - 0.24 * (d - 1.0))
 
 
 @dataclass
@@ -512,19 +586,28 @@ def build_clusters(base: pd.DataFrame, features: List[str]) -> Tuple[pd.DataFram
     rows = []
     for cl in sorted(np.unique(labels)):
         sub_idx = feat_df.index[labels == cl]
-        rows.append({
-            "cluster": int(cl),
-            "samples": int((labels == cl).sum()),
-            "bounce_rate": float(base.loc[sub_idx, "bounce_success"].mean()),
-            "repair_rate": float(base.loc[sub_idx, "repair_success"].mean()),
-            "regime_rate": float(base.loc[sub_idx, "regime_success"].mean()),
-            "fall_rate": float(base.loc[sub_idx, "fall_success"].mean()),
-            **{f"{f}_median": float(base.loc[sub_idx, f].median()) for f in features if f in base.columns}
-        })
+        rows.append(
+            {
+                "cluster": int(cl),
+                "samples": int((labels == cl).sum()),
+                "bounce_rate": float(base.loc[sub_idx, "bounce_success"].mean()),
+                "repair_rate": float(base.loc[sub_idx, "repair_success"].mean()),
+                "regime_rate": float(base.loc[sub_idx, "regime_success"].mean()),
+                "fall_rate": float(base.loc[sub_idx, "fall_success"].mean()),
+                **{f"{f}_median": float(base.loc[sub_idx, f].median()) for f in features if f in base.columns},
+            }
+        )
     stats_df = pd.DataFrame(rows).sort_values("cluster").reset_index(drop=True)
     names = assign_cluster_names(stats_df)
     stats_df["cluster_name"] = stats_df["cluster"].map(names)
-    art = ClusterArtifacts(scaler_mean=scaler.mean_.tolist(), scaler_scale=scaler.scale_.tolist(), features=features, centroids=km.cluster_centers_.tolist(), cluster_names={str(k): v for k, v in names.items()}, silhouette_score=float(sil))
+    art = ClusterArtifacts(
+        scaler_mean=scaler.mean_.tolist(),
+        scaler_scale=scaler.scale_.tolist(),
+        features=features,
+        centroids=km.cluster_centers_.tolist(),
+        cluster_names={str(k): v for k, v in names.items()},
+        silhouette_score=float(sil),
+    )
     return stats_df, art
 
 
@@ -555,6 +638,7 @@ def build_model_from_history(daily: pd.DataFrame, weekly: pd.DataFrame) -> Dict[
     piv_rsi = daily_feat.pivot(index="date", columns="symbol", values="rsi14")
     piv_cci = daily_feat.pivot(index="date", columns="symbol", values="cci20")
     piv_mh = daily_feat.pivot(index="date", columns="symbol", values="macd_hist")
+
     for sym in piv_pb.columns:
         base[f"{sym}_%B"] = piv_pb[sym]
     for sym in piv_rsi.columns:
@@ -563,11 +647,13 @@ def build_model_from_history(daily: pd.DataFrame, weekly: pd.DataFrame) -> Dict[
         base[f"{sym}_CCI20"] = piv_cci[sym]
     for sym in piv_mh.columns:
         base[f"{sym}_MACDH"] = piv_mh[sym]
+
     outcomes = build_outcomes(piv_close["RSP"].dropna())
     base = base.join(outcomes, how="inner").dropna(subset=["RSP"])
 
     features = [c for c in base.columns if c not in [f"{k}_success" for k in OUTCOME_DEFS]]
     features = [c for c in features if base[c].notna().sum() >= 80]
+
     learned = {"states": {}, "bands": {}, "meta": {"rows": int(len(base))}}
     for state in ["bounce", "repair", "regime", "fall"]:
         singles = learn_single_gates(base, features, state)
@@ -597,6 +683,7 @@ def build_model_from_history(daily: pd.DataFrame, weekly: pd.DataFrame) -> Dict[
     save_json(MODEL_PATH, learned)
     return learned
 
+
 # -----------------------------
 # Current snapshot / evaluation
 # -----------------------------
@@ -611,10 +698,6 @@ def build_snapshot_from_history_and_csv(daily_feat: pd.DataFrame, snapshot_df: O
 
     if snapshot_df is not None and not snapshot_df.empty:
         snap_map = dict(zip(snapshot_df["symbol"], snapshot_df["close"]))
-        close_row = piv_close.loc[latest_date].copy()
-        for sym, val in snap_map.items():
-            if sym in close_row.index:
-                close_row[sym] = val
         hist_recalc = daily_feat.copy()
         last_mask = hist_recalc["date"] == latest_date
         for sym, val in snap_map.items():
@@ -708,20 +791,22 @@ def compute_repair_oscillator_matrix(snapshot: Dict[str, float], prev_snapshot: 
             state = "Mixed"
         else:
             state = "Not repairing"
-        rows.append({
-            "Feature": sym,
-            "Level": level,
-            "BB%": bb,
-            "BB% Δ": None if pd.isna(bb) or pd.isna(prev_bb) else bb - prev_bb,
-            "RSI14": rsi_v,
-            "RSI Δ": None if pd.isna(rsi_v) or pd.isna(prev_rsi) else rsi_v - prev_rsi,
-            "CCI20": cci_v,
-            "CCI Δ": None if pd.isna(cci_v) or pd.isna(prev_cci) else cci_v - prev_cci,
-            "MACDH": mh,
-            "MACDH Δ": None if pd.isna(mh) or pd.isna(prev_mh) else mh - prev_mh,
-            "Repair Score": score,
-            "Oscillator State": state,
-        })
+        rows.append(
+            {
+                "Feature": sym,
+                "Level": level,
+                "BB%": bb,
+                "BB% Δ": None if pd.isna(bb) or pd.isna(prev_bb) else bb - prev_bb,
+                "RSI14": rsi_v,
+                "RSI Δ": None if pd.isna(rsi_v) or pd.isna(prev_rsi) else rsi_v - prev_rsi,
+                "CCI20": cci_v,
+                "CCI Δ": None if pd.isna(cci_v) or pd.isna(prev_cci) else cci_v - prev_cci,
+                "MACDH": mh,
+                "MACDH Δ": None if pd.isna(mh) or pd.isna(prev_mh) else mh - prev_mh,
+                "Repair Score": score,
+                "Oscillator State": state,
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -734,8 +819,10 @@ def build_range_map(snapshot: Dict[str, float], bands: Dict[str, Any]) -> pd.Dat
         g = bands.get("regime", {}).get(feat)
         if not any([b, r, g]):
             continue
+
         def rng(meta):
             return (meta.get("q25"), meta.get("q75"), meta.get("median")) if meta else (np.nan, np.nan, np.nan)
+
         b25, b75, bc = rng(b)
         r25, r75, rc = rng(r)
         g25, g75, gc = rng(g)
@@ -754,20 +841,24 @@ def build_range_map(snapshot: Dict[str, float], bands: Dict[str, Any]) -> pd.Dat
                     state = "Washout / Fall Risk" if (pd.notna(b25) and cur > b75) else "Transitional"
                 else:
                     state = "Washout / Fall Risk" if (pd.notna(b25) and cur < b25) else "Transitional"
-        rows.append({
-            "Feature": feat, "Current": cur,
-            "Bounce Range": f"{fmt_num(b25,3)} – {fmt_num(b75,3)}", "Bounce Center": bc,
-            "Repair Range": f"{fmt_num(r25,3)} – {fmt_num(r75,3)}", "Repair Center": rc,
-            "Regime Range": f"{fmt_num(g25,3)} – {fmt_num(g75,3)}", "Regime Center": gc,
-            "State Ladder": state,
-        })
+        rows.append(
+            {
+                "Feature": feat,
+                "Current": cur,
+                "Bounce Range": f"{fmt_num(b25,3)} – {fmt_num(b75,3)}",
+                "Bounce Center": bc,
+                "Repair Range": f"{fmt_num(r25,3)} – {fmt_num(r75,3)}",
+                "Repair Center": rc,
+                "Regime Range": f"{fmt_num(g25,3)} – {fmt_num(g75,3)}",
+                "Regime Center": gc,
+                "State Ladder": state,
+            }
+        )
     return pd.DataFrame(rows)
 
 
 def nearest_confirmation_from_ranges(snapshot: Dict[str, float], bands: Dict[str, Any], bullish: bool = True) -> List[dict]:
     setups = []
-    target_state = "repair" if bullish else "fall"
-    target_bands = bands.get(target_state, {}) if target_state != "fall" else {}
     if bullish:
         for feat in ["$BPSPX_%B", "$SPXA50R", "$BPSPX", "$BPNYA", "$NYMO", "$CPCE", "$TRIN", "RSP:SPY"]:
             cur = safe_float(snapshot.get(feat, np.nan))
@@ -777,8 +868,6 @@ def nearest_confirmation_from_ranges(snapshot: Dict[str, float], bands: Dict[str
                 q25 = bands["repair"][feat]["q25"]
                 q75 = bands["repair"][feat]["q75"]
                 if feat in INVERSE_INDICATORS:
-                    target = q75 if cur > q75 else q25
-                    op = "≤" if cur > q75 else "inside"
                     if cur > q75:
                         gap = cur - q75
                         setups.append({"feature": feat, "op": "≤", "threshold": q75, "current": cur, "gap": gap, "state": "repair"})
@@ -793,7 +882,6 @@ def nearest_confirmation_from_ranges(snapshot: Dict[str, float], bands: Dict[str
                 continue
             if feat in bands.get("bounce", {}):
                 q25 = bands["bounce"][feat]["q25"]
-                q75 = bands["bounce"][feat]["q75"]
                 if feat in INVERSE_INDICATORS:
                     if cur < q25:
                         setups.append({"feature": feat, "op": "≥", "threshold": q25, "current": cur, "gap": q25 - cur, "state": "fall"})
@@ -838,7 +926,13 @@ def classify_signal(state_scores: Dict[str, Any], canary: Dict[str, Any], recove
     regime = state_scores["regime"]
     fall = state_scores["fall"]
     repairing_count = int((osc_df["Repair Score"] >= 2).sum()) if not osc_df.empty else 0
-    long_flag = (((bounce["pass_frac"] >= 0.55 and bounce["prob"] >= max(0.40, bounce["base_rate"] + 0.08)) or (repair["pass_frac"] >= 0.50 and repair["prob"] >= max(0.30, repair["base_rate"] + 0.06))) and recovery_score >= 45 and repairing_count >= 3 and canary["label"] != "Risk-Off") or ((regime["pass_frac"] >= 0.50 and regime["prob"] >= max(0.30, regime["base_rate"] + 0.05) and canary["label"] != "Risk-Off"))
+    long_flag = (
+        ((bounce["pass_frac"] >= 0.55 and bounce["prob"] >= max(0.40, bounce["base_rate"] + 0.08))
+         or (repair["pass_frac"] >= 0.50 and repair["prob"] >= max(0.30, repair["base_rate"] + 0.06)))
+        and recovery_score >= 45
+        and repairing_count >= 3
+        and canary["label"] != "Risk-Off"
+    ) or ((regime["pass_frac"] >= 0.50 and regime["prob"] >= max(0.30, regime["base_rate"] + 0.05) and canary["label"] != "Risk-Off"))
     short_flag = (fall["pass_frac"] >= 0.50 and fall["prob"] >= max(0.25, fall["base_rate"] + 0.05) and canary["label"] != "Risk-On" and recovery_score < 40 and repairing_count <= 2)
     signal = "LONG" if long_flag else "SHORT" if short_flag else "HOLD"
     reasons = []
@@ -858,6 +952,344 @@ def classify_signal(state_scores: Dict[str, Any], canary: Dict[str, Any], recove
     return {"signal": signal, "reasons": reasons, "bounce_prob": bounce["prob"], "repair_prob": repair["prob"], "regime_prob": regime["prob"], "fall_prob": fall["prob"]}
 
 
+# -----------------------------
+# Holistic TSI
+# -----------------------------
+def orient_series_for_risk(series: pd.Series, symbol: str) -> pd.Series:
+    series = pd.to_numeric(series, errors="coerce")
+    return -series if symbol in INVERSE_INDICATORS else series
+
+
+def compute_bucket_composite(piv_close: pd.DataFrame, symbols: List[str], long_len: int, short_len: int, signal_len: int) -> Tuple[pd.Series, pd.Series, pd.DataFrame]:
+    component_rows = []
+    aligned_tsi = {}
+    aligned_sig = {}
+
+    for sym in symbols:
+        if sym not in piv_close.columns:
+            continue
+        raw = piv_close[sym].dropna()
+        if raw.shape[0] < max(long_len + short_len + signal_len + 10, 60):
+            continue
+        oriented = orient_series_for_risk(raw, sym)
+        tsi, sig = true_strength_index(oriented, long_len, short_len, signal_len)
+        if tsi.dropna().empty or sig.dropna().empty:
+            continue
+        common = tsi.index.intersection(sig.index)
+        tsi = tsi.loc[common]
+        sig = sig.loc[common]
+        w = TSI_COMPONENT_WEIGHTS.get(sym, 1.0)
+        aligned_tsi[sym] = tsi * w
+        aligned_sig[sym] = sig * w
+
+        gap = tsi - sig
+        slope3 = tsi.diff(3)
+        component_rows.append(
+            pd.DataFrame(
+                {
+                    "date": common,
+                    "symbol": sym,
+                    "weight": w,
+                    "tsi": tsi.values,
+                    "signal": sig.values,
+                    "gap": gap.values,
+                    "slope3": slope3.values,
+                    "above_signal": (tsi > sig).astype(int).values,
+                    "above_zero": (tsi > 0).astype(int).values,
+                }
+            )
+        )
+
+    if not aligned_tsi:
+        return pd.Series(dtype=float), pd.Series(dtype=float), pd.DataFrame()
+
+    tsi_df = pd.DataFrame(aligned_tsi).sort_index()
+    sig_df = pd.DataFrame(aligned_sig).sort_index()
+    weights = pd.Series({c: TSI_COMPONENT_WEIGHTS.get(c, 1.0) for c in tsi_df.columns})
+    weights = weights / weights.sum()
+    bucket_tsi = tsi_df.mul(weights, axis=1).sum(axis=1)
+    bucket_sig = sig_df.mul(weights, axis=1).sum(axis=1)
+    comp_df = pd.concat(component_rows, ignore_index=True)
+    return bucket_tsi, bucket_sig, comp_df
+
+
+def compute_holistic_tsi_history(daily_feat: pd.DataFrame, long_len: int, short_len: int, signal_len: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    piv_close = daily_feat.pivot(index="date", columns="symbol", values="close").sort_index()
+
+    bucket_out = {}
+    component_tables = []
+
+    for bucket_name, syms in TSI_BUCKETS.items():
+        b_tsi, b_sig, comp_df = compute_bucket_composite(piv_close, syms, long_len, short_len, signal_len)
+        if not b_tsi.empty:
+            bucket_out[f"{bucket_name}_tsi"] = b_tsi
+            bucket_out[f"{bucket_name}_signal"] = b_sig
+        if not comp_df.empty:
+            comp_df["bucket"] = bucket_name
+            component_tables.append(comp_df)
+
+    if not bucket_out:
+        return pd.DataFrame(), pd.DataFrame()
+
+    hist = pd.DataFrame(bucket_out).sort_index()
+    used_bucket_weights = {k: v for k, v in TSI_BUCKET_WEIGHTS.items() if f"{k}_tsi" in hist.columns}
+    total_w = sum(used_bucket_weights.values())
+    used_bucket_weights = {k: v / total_w for k, v in used_bucket_weights.items()}
+
+    hist["holistic_tsi"] = 0.0
+    hist["holistic_signal"] = 0.0
+    for k, w in used_bucket_weights.items():
+        hist["holistic_tsi"] += hist[f"{k}_tsi"] * w
+        hist["holistic_signal"] += hist[f"{k}_signal"] * w
+
+    # participation metrics
+    if component_tables:
+        comp_all = pd.concat(component_tables, ignore_index=True)
+        part = (
+            comp_all.groupby("date")
+            .agg(
+                components=("symbol", "nunique"),
+                above_signal=("above_signal", "sum"),
+                above_zero=("above_zero", "sum"),
+                mean_gap=("gap", "mean"),
+                mean_slope3=("slope3", "mean"),
+            )
+            .sort_index()
+        )
+        hist = hist.join(part, how="left")
+        hist["pct_above_signal"] = 100 * hist["above_signal"] / hist["components"]
+        hist["pct_above_zero"] = 100 * hist["above_zero"] / hist["components"]
+
+        bucket_part = (
+            comp_all.groupby(["date", "bucket"])
+            .agg(
+                comps=("symbol", "nunique"),
+                above_sig=("above_signal", "sum"),
+                above_zero=("above_zero", "sum"),
+            )
+            .reset_index()
+        )
+        for bucket in sorted(bucket_part["bucket"].unique()):
+            sub = bucket_part[bucket_part["bucket"] == bucket].set_index("date")
+            hist[f"{bucket}_pct_above_signal"] = 100 * sub["above_sig"] / sub["comps"]
+            hist[f"{bucket}_pct_above_zero"] = 100 * sub["above_zero"] / sub["comps"]
+
+    hist["gap"] = hist["holistic_tsi"] - hist["holistic_signal"]
+    hist["gap_prev"] = hist["gap"].shift(1)
+    hist["slope1"] = hist["holistic_tsi"].diff(1)
+    hist["slope3"] = hist["holistic_tsi"].diff(3)
+    hist["cross_up"] = (hist["gap"] > 0) & (hist["gap_prev"] <= 0)
+    hist["cross_down"] = (hist["gap"] < 0) & (hist["gap_prev"] >= 0)
+    hist["zero_up"] = (hist["holistic_tsi"] > 0) & (hist["holistic_tsi"].shift(1) <= 0)
+    hist["zero_down"] = (hist["holistic_tsi"] < 0) & (hist["holistic_tsi"].shift(1) >= 0)
+    hist["distance_to_cross_pct"] = 100 * (1 - (hist["gap"].abs() / (hist["holistic_tsi"].abs() + hist["holistic_signal"].abs() + 1e-6)).clip(0, 1))
+    comp_df_final = pd.concat(component_tables, ignore_index=True) if component_tables else pd.DataFrame()
+    return hist, comp_df_final
+
+
+def holistic_gauge_state(row: pd.Series) -> Dict[str, Any]:
+    if row is None or row.empty or pd.isna(row.get("holistic_tsi", np.nan)) or pd.isna(row.get("holistic_signal", np.nan)):
+        return {"label": "No data", "action": "n/a", "emoji": "⚪", "pct": 0.0, "trade_bias": "n/a"}
+
+    tsi = safe_float(row["holistic_tsi"])
+    sig = safe_float(row["holistic_signal"])
+    gap = tsi - sig
+    slope = safe_float(row.get("slope3", np.nan))
+    pct_align = safe_float(row.get("pct_above_signal", np.nan))
+    proximity = float(np.clip(row.get("distance_to_cross_pct", 0.0), 0, 100))
+
+    just_crossed_up = bool(row.get("cross_up", False))
+    just_crossed_down = bool(row.get("cross_down", False))
+    above_zero = tsi > 0
+    below_zero = tsi < 0
+
+    # confidence / completion style percentage
+    base_pct = min(100.0, max(0.0, 0.55 * proximity + 0.45 * (0 if pd.isna(pct_align) else pct_align)))
+
+    if just_crossed_up and below_zero:
+        return {"label": "Bounce Triggered", "action": "Probe long", "emoji": "🟡", "pct": max(88.0, base_pct), "trade_bias": "early_bull"}
+    if gap > 0 and below_zero and slope > 0:
+        return {"label": "Repair Underway", "action": "Add only on strength", "emoji": "🟡", "pct": max(75.0, base_pct), "trade_bias": "repair"}
+    if just_crossed_up and above_zero:
+        return {"label": "Regime Up Confirmed", "action": "Full bull bias", "emoji": "🟢", "pct": 100.0, "trade_bias": "regime_up"}
+    if gap > 0 and above_zero and slope >= 0:
+        return {"label": "Bullish Regime", "action": "Hold / add winners", "emoji": "🟢", "pct": max(80.0, base_pct), "trade_bias": "bull"}
+    if gap > 0 and above_zero and slope < 0:
+        return {"label": "Overheating", "action": "Trim into strength", "emoji": "🟠", "pct": max(70.0, 100 - proximity / 2), "trade_bias": "overheat"}
+    if just_crossed_down and above_zero:
+        return {"label": "Fall Triggered", "action": "Trim / hedge", "emoji": "🔴", "pct": 100.0, "trade_bias": "fall"}
+    if gap < 0 and above_zero:
+        return {"label": "Near Bearish Cross", "action": "Reduce risk", "emoji": "🟠", "pct": max(85.0, base_pct), "trade_bias": "weakening"}
+    if just_crossed_down and below_zero:
+        return {"label": "Regime Down Confirmed", "action": "Defensive / short bias", "emoji": "🔴", "pct": 100.0, "trade_bias": "regime_down"}
+    if gap < 0 and below_zero:
+        return {"label": "Bearish Regime", "action": "Stay defensive", "emoji": "🔴", "pct": max(80.0, base_pct), "trade_bias": "bear"}
+    if abs(gap) <= 1.0 and slope > 0:
+        return {"label": "Near Bullish Cross", "action": "Probe if other signals agree", "emoji": "🟡", "pct": max(90.0, base_pct), "trade_bias": "near_bull"}
+    if abs(gap) <= 1.0 and slope < 0:
+        return {"label": "Near Bearish Cross", "action": "Tighten stops", "emoji": "🟠", "pct": max(90.0, base_pct), "trade_bias": "near_bear"}
+    return {"label": "Neutral / Mixed", "action": "Hold / wait", "emoji": "⚪", "pct": base_pct, "trade_bias": "neutral"}
+
+
+def compute_lead_lag_events(hist: pd.DataFrame, benchmark_price: pd.Series, bench_tsi: pd.Series, look_forward: int = 10, bounce_thr: float = 0.03, fall_thr: float = -0.03) -> pd.DataFrame:
+    df = hist.copy()
+    bench = pd.DataFrame({"price": benchmark_price, "bench_tsi": bench_tsi}).dropna()
+    df = df.join(bench, how="inner")
+    if df.empty or len(df) < look_forward + 20:
+        return pd.DataFrame()
+
+    out_rows = []
+    for dt in df.index[:-look_forward]:
+        future_window = df.loc[dt:].iloc[: look_forward + 1]
+        if len(future_window) < look_forward + 1:
+            continue
+        fwd_ret = future_window["price"].iloc[-1] / future_window["price"].iloc[0] - 1
+        bench_gap = future_window["bench_tsi"].iloc[1:] - future_window["bench_tsi"].iloc[1:].shift(1)
+
+        if fwd_ret >= bounce_thr:
+            prior = df.loc[:dt].tail(20)
+            h_cross = prior[prior["cross_up"]]
+            h_zero = prior[prior["zero_up"]]
+            b_cross_dates = prior.index[(prior["bench_tsi"] > prior["bench_tsi"].shift(1)) & (prior["bench_tsi"].shift(1) <= 0)]
+            out_rows.append(
+                {
+                    "event": "Bounce / Rally",
+                    "event_date": dt,
+                    "holistic_cross_lead_days": (dt - h_cross.index[-1]).days if not h_cross.empty else np.nan,
+                    "holistic_zero_lead_days": (dt - h_zero.index[-1]).days if not h_zero.empty else np.nan,
+                    "benchmark_tsi_turn_lead_days": (dt - b_cross_dates[-1]).days if len(b_cross_dates) else np.nan,
+                    "forward_return": fwd_ret,
+                }
+            )
+        elif fwd_ret <= fall_thr:
+            prior = df.loc[:dt].tail(20)
+            h_cross = prior[prior["cross_down"]]
+            h_zero = prior[prior["zero_down"]]
+            b_cross_dates = prior.index[(prior["bench_tsi"] < prior["bench_tsi"].shift(1)) & (prior["bench_tsi"].shift(1) >= 0)]
+            out_rows.append(
+                {
+                    "event": "Fall / Breakdown",
+                    "event_date": dt,
+                    "holistic_cross_lead_days": (dt - h_cross.index[-1]).days if not h_cross.empty else np.nan,
+                    "holistic_zero_lead_days": (dt - h_zero.index[-1]).days if not h_zero.empty else np.nan,
+                    "benchmark_tsi_turn_lead_days": (dt - b_cross_dates[-1]).days if len(b_cross_dates) else np.nan,
+                    "forward_return": fwd_ret,
+                }
+            )
+    return pd.DataFrame(out_rows)
+
+
+def run_holistic_backtest(
+    hist: pd.DataFrame,
+    daily_feat: pd.DataFrame,
+    benchmark_symbol: str = "RSP",
+    mode: str = "Long / Cash",
+    signal_logic: str = "Cross vs signal",
+    require_zero_filter: bool = False,
+    min_align: float = 50.0,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    piv = daily_feat.pivot(index="date", columns="symbol", values="close").sort_index()
+    if benchmark_symbol not in piv.columns:
+        raise ValueError(f"{benchmark_symbol} not found in daily history")
+
+    bench = piv[benchmark_symbol].rename("price").dropna().to_frame()
+    bench["ret"] = bench["price"].pct_change()
+    bt = hist.join(bench, how="inner").dropna(subset=["holistic_tsi", "holistic_signal", "price"])
+    if bt.empty:
+        return pd.DataFrame(), {}
+
+    if benchmark_symbol in bt.columns:
+        pass
+
+    gap = bt["holistic_tsi"] - bt["holistic_signal"]
+
+    if signal_logic == "Cross vs signal":
+        long_entry = (gap > 0) & (gap.shift(1) <= 0)
+        exit_signal = (gap < 0) & (gap.shift(1) >= 0)
+    elif signal_logic == "Cross zero":
+        long_entry = (bt["holistic_tsi"] > 0) & (bt["holistic_tsi"].shift(1) <= 0)
+        exit_signal = (bt["holistic_tsi"] < 0) & (bt["holistic_tsi"].shift(1) >= 0)
+    else:
+        long_entry = ((gap > 0) & (gap.shift(1) <= 0)) | ((bt["holistic_tsi"] > 0) & (bt["holistic_tsi"].shift(1) <= 0))
+        exit_signal = ((gap < 0) & (gap.shift(1) >= 0)) | ((bt["holistic_tsi"] < 0) & (bt["holistic_tsi"].shift(1) >= 0))
+
+    short_entry = (gap < 0) & (gap.shift(1) >= 0)
+    short_exit = (gap > 0) & (gap.shift(1) <= 0)
+
+    if require_zero_filter:
+        long_entry = long_entry & (bt["holistic_tsi"] > 0)
+        short_entry = short_entry & (bt["holistic_tsi"] < 0)
+
+    if "pct_above_signal" in bt.columns:
+        long_entry = long_entry & (bt["pct_above_signal"] >= min_align)
+        if mode == "Long / Short":
+            short_entry = short_entry & ((100 - bt["pct_above_signal"]) >= min_align)
+
+    position = []
+    pos = 0
+    for idx, row in bt.iterrows():
+        if mode == "Long / Cash":
+            if long_entry.loc[idx]:
+                pos = 1
+            elif exit_signal.loc[idx]:
+                pos = 0
+        else:
+            if long_entry.loc[idx]:
+                pos = 1
+            elif short_entry.loc[idx]:
+                pos = -1
+            elif pos == 1 and exit_signal.loc[idx]:
+                pos = 0
+            elif pos == -1 and short_exit.loc[idx]:
+                pos = 0
+        position.append(pos)
+
+    bt["position"] = pd.Series(position, index=bt.index).shift(1).fillna(0)
+    bt["strategy_ret"] = bt["position"] * bt["ret"].fillna(0)
+    bt["buy_hold_ret"] = bt["ret"].fillna(0)
+    bt["strategy_equity"] = (1 + bt["strategy_ret"]).cumprod()
+    bt["buy_hold_equity"] = (1 + bt["buy_hold_ret"]).cumprod()
+    bt["price_tsi"], bt["price_tsi_signal"] = true_strength_index(bt["price"], 25, 13, 7)
+
+    total_ret = bt["strategy_equity"].iloc[-1] - 1
+    bh_ret = bt["buy_hold_equity"].iloc[-1] - 1
+    cagr = bt["strategy_equity"].iloc[-1] ** (252 / max(len(bt), 1)) - 1
+    bh_cagr = bt["buy_hold_equity"].iloc[-1] ** (252 / max(len(bt), 1)) - 1
+    max_dd = (bt["strategy_equity"] / bt["strategy_equity"].cummax() - 1).min()
+    bh_max_dd = (bt["buy_hold_equity"] / bt["buy_hold_equity"].cummax() - 1).min()
+    trades = int(((bt["position"] != bt["position"].shift(1)) & (bt["position"] != 0)).sum())
+    win_days = float((bt["strategy_ret"] > 0).mean() * 100)
+
+    lead_events = compute_lead_lag_events(bt[["holistic_tsi", "holistic_signal", "cross_up", "cross_down", "zero_up", "zero_down"]], bt["price"], bt["price_tsi"])
+    lead_summary = {}
+    if not lead_events.empty:
+        for evt in ["Bounce / Rally", "Fall / Breakdown"]:
+            sub = lead_events[lead_events["event"] == evt]
+            if not sub.empty:
+                lead_summary[evt] = {
+                    "holistic_cross_lead_days": float(sub["holistic_cross_lead_days"].mean()),
+                    "holistic_zero_lead_days": float(sub["holistic_zero_lead_days"].mean()),
+                    "benchmark_tsi_turn_lead_days": float(sub["benchmark_tsi_turn_lead_days"].mean()),
+                    "count": int(len(sub)),
+                }
+
+    stats = {
+        "strategy_return": total_ret,
+        "buy_hold_return": bh_ret,
+        "strategy_cagr": cagr,
+        "buy_hold_cagr": bh_cagr,
+        "strategy_max_dd": max_dd,
+        "buy_hold_max_dd": bh_max_dd,
+        "trades": trades,
+        "win_day_pct": win_days,
+        "lead_summary": lead_summary,
+    }
+    return bt, stats
+
+
+# -----------------------------
+# Rendering helpers
+# -----------------------------
 @st.cache_data(show_spinner=False)
 def build_model_from_history_bytes(file_bytes: bytes) -> Dict[str, Any]:
     daily, weekly = parse_stockcharts_zip(file_bytes)
@@ -869,11 +1301,18 @@ def load_model() -> Optional[Dict[str, Any]]:
 
 
 def render_score_card(title: str, value: float, pct: Optional[float] = None):
+    pill_class = "pill-blue"
+    if title.lower() == "bounce":
+        pill_class = "pill-blue"
+    elif title.lower() in {"repair", "regime"}:
+        pill_class = "pill-green"
+    elif title.lower() == "fall":
+        pill_class = "pill-red"
     st.markdown("<div class='soft-card'>", unsafe_allow_html=True)
     st.markdown(f"<div class='score-title'>{title}</div>", unsafe_allow_html=True)
     st.markdown(f"<div class='score-value'>{int(round(value)) if pd.notna(value) else 'n/a'}</div>", unsafe_allow_html=True)
     if pct is not None and pd.notna(pct):
-        st.markdown(f"<span class='pill pill-red'>{pct:.1f}%</span>", unsafe_allow_html=True)
+        st.markdown(f"<span class='pill {pill_class}'>{pct:.1f}%</span>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -884,6 +1323,58 @@ def render_signal_box(signal: str, text: str):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def gauge_color_class(label: str) -> str:
+    if any(x in label for x in ["Regime Up", "Bullish Regime"]):
+        return "state-green"
+    if any(x in label for x in ["Bounce", "Repair", "Near Bullish"]):
+        return "state-yellow"
+    if any(x in label for x in ["Fall", "Bearish", "Regime Down"]):
+        return "state-red"
+    if "Overheating" in label:
+        return "state-yellow"
+    return ""
+
+
+def render_holistic_gauge(gauge: Dict[str, Any], row: pd.Series):
+    pct = float(np.clip(gauge["pct"], 0, 100))
+    left_pos = max(1, min(98, pct))
+    css = gauge_color_class(gauge["label"])
+    st.markdown(f"<div class='soft-card {css}'>", unsafe_allow_html=True)
+    st.markdown("<div class='score-title'>Holistic TSI Gauge</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='score-value-sm'>{gauge['emoji']} {gauge['label']} — {pct:.0f}%</div>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill pill-blue'>Action: {gauge['action']}</span>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill pill-yellow'>TSI: {fmt_num(row.get('holistic_tsi', np.nan),2)}</span>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill pill-blue'>Signal: {fmt_num(row.get('holistic_signal', np.nan),2)}</span>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill pill-green'>Above signal: {fmt_num(row.get('pct_above_signal', np.nan),1)}%</span>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='gauge-wrap'><div class='gauge-track'><div class='gauge-marker' style='left: calc({left_pos}% - 5px);'></div></div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='tiny-muted'>Below zero bullish cross = Bounce / Repair. Above zero bullish state = Regime Up. Bearish mirrors apply on the downside.</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def make_line_figure(df: pd.DataFrame, cols: List[str], title: str, zero_line: bool = False) -> go.Figure:
+    fig = go.Figure()
+    for c in cols:
+        if c in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df[c], mode="lines", name=c))
+    if zero_line:
+        fig.add_hline(y=0, line_dash="dot", line_width=1)
+    fig.update_layout(
+        title=title,
+        height=420,
+        margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        xaxis_title="Date",
+        template="plotly_dark",
+    )
+    return fig
+
+
 def main():
     with st.sidebar:
         st.header("⚙️ Configuration")
@@ -892,6 +1383,17 @@ def main():
         force_rebuild = st.toggle("Force rebuild model", value=False)
         run_backtest = st.button("Run historical backtest")
         reset = st.button("Reset Model")
+        st.markdown("---")
+        st.subheader("Holistic TSI Settings")
+        tsi_long = st.number_input("TSI Long Length", min_value=5, max_value=100, value=25, step=1)
+        tsi_short = st.number_input("TSI Short Length", min_value=2, max_value=50, value=13, step=1)
+        tsi_signal = st.number_input("TSI Signal Length", min_value=2, max_value=30, value=7, step=1)
+        benchmark_symbol = st.selectbox("Backtest Benchmark", ["RSP", "SPY"], index=0)
+        bt_mode = st.selectbox("Backtest Mode", ["Long / Cash", "Long / Short"], index=0)
+        bt_logic = st.selectbox("Signal Logic", ["Cross vs signal", "Cross zero", "Either"], index=0)
+        bt_zero_filter = st.toggle("Require zero filter", value=False)
+        bt_min_align = st.slider("Min component alignment %", 0, 100, 50, 5)
+
         if reset:
             for p in [HIST_DAILY_PATH, HIST_WEEKLY_PATH, MODEL_PATH]:
                 if p.exists():
@@ -915,7 +1417,7 @@ def main():
     snapshot, prev_snapshot, latest_date = build_snapshot_from_history_and_csv(daily_feat, snapshot_df)
 
     state_scores = {state: evaluate_state(snapshot, model["states"][state]) for state in ["bounce", "repair", "regime", "fall"]}
-    band_df, band_totals = score_bands(snapshot, model.get("bands", {}))
+    _, _ = score_bands(snapshot, model.get("bands", {}))
     range_df = build_range_map(snapshot, model.get("bands", {}))
     osc_df = compute_repair_oscillator_matrix(snapshot, prev_snapshot)
 
@@ -929,41 +1431,72 @@ def main():
         canary_comp, canary_conf = 0.0, 0.0
     canary = {"label": "Risk-On" if canary_comp > 0.05 else "Risk-Off" if canary_comp < -0.05 else "Neutral", "comp": canary_comp, "conf": canary_conf}
 
-    # simple recovery score from oscillator matrix
     recovery_score = float(np.clip(osc_df["Repair Score"].mean() / 4 * 100, 0, 100)) if not osc_df.empty else np.nan
 
     cluster_info = model.get("clusters")
     cluster_name, cluster_conf = None, None
     if cluster_info:
-        cl_id, cluster_name, cluster_conf = predict_cluster(snapshot, ClusterArtifacts(
-            scaler_mean=cluster_info["mean"], scaler_scale=cluster_info["scale"], features=cluster_info["features"],
-            centroids=cluster_info["centroids"], cluster_names=cluster_info["names"], silhouette_score=cluster_info.get("silhouette", 0.0)
-        ))
+        _, cluster_name, cluster_conf = predict_cluster(
+            snapshot,
+            ClusterArtifacts(
+                scaler_mean=cluster_info["mean"],
+                scaler_scale=cluster_info["scale"],
+                features=cluster_info["features"],
+                centroids=cluster_info["centroids"],
+                cluster_names=cluster_info["names"],
+                silhouette_score=cluster_info.get("silhouette", 0.0),
+            ),
+        )
 
     signal = classify_signal(state_scores, canary, recovery_score, cluster_name, osc_df)
     long_setups = nearest_confirmation_from_ranges(snapshot, model.get("bands", {}), bullish=True)
     short_setups = nearest_confirmation_from_ranges(snapshot, model.get("bands", {}), bullish=False)
 
+    holistic_hist, holistic_components = compute_holistic_tsi_history(daily_feat, tsi_long, tsi_short, tsi_signal)
+    holistic_row = holistic_hist.loc[holistic_hist.index.max()] if not holistic_hist.empty else pd.Series(dtype=float)
+    gauge = holistic_gauge_state(holistic_row)
+
+    bt_df, bt_stats = (pd.DataFrame(), {})
+    if run_backtest and not holistic_hist.empty:
+        bt_df, bt_stats = run_holistic_backtest(
+            holistic_hist,
+            daily_feat,
+            benchmark_symbol=benchmark_symbol,
+            mode=bt_mode,
+            signal_logic=bt_logic,
+            require_zero_filter=bt_zero_filter,
+            min_align=bt_min_align,
+        )
+
     c1, c2, c3, c4 = st.columns(4)
-    with c1: render_score_card("Bounce", 100 * state_scores["bounce"]["prob"] if pd.notna(state_scores["bounce"]["prob"]) else 0, 100 * state_scores["bounce"]["prob"] if pd.notna(state_scores["bounce"]["prob"]) else np.nan)
-    with c2: render_score_card("Repair", 100 * state_scores["repair"]["prob"] if pd.notna(state_scores["repair"]["prob"]) else 0, 100 * state_scores["repair"]["prob"] if pd.notna(state_scores["repair"]["prob"]) else np.nan)
-    with c3: render_score_card("Regime", 100 * state_scores["regime"]["prob"] if pd.notna(state_scores["regime"]["prob"]) else 0, 100 * state_scores["regime"]["prob"] if pd.notna(state_scores["regime"]["prob"]) else np.nan)
-    with c4: render_score_card("Fall", 100 * state_scores["fall"]["prob"] if pd.notna(state_scores["fall"]["prob"]) else 0, 100 * state_scores["fall"]["prob"] if pd.notna(state_scores["fall"]["prob"]) else np.nan)
+    with c1:
+        render_score_card("Bounce", 100 * state_scores["bounce"]["prob"] if pd.notna(state_scores["bounce"]["prob"]) else 0, 100 * state_scores["bounce"]["prob"] if pd.notna(state_scores["bounce"]["prob"]) else np.nan)
+    with c2:
+        render_score_card("Repair", 100 * state_scores["repair"]["prob"] if pd.notna(state_scores["repair"]["prob"]) else 0, 100 * state_scores["repair"]["prob"] if pd.notna(state_scores["repair"]["prob"]) else np.nan)
+    with c3:
+        render_score_card("Regime", 100 * state_scores["regime"]["prob"] if pd.notna(state_scores["regime"]["prob"]) else 0, 100 * state_scores["regime"]["prob"] if pd.notna(state_scores["regime"]["prob"]) else np.nan)
+    with c4:
+        render_score_card("Fall", 100 * state_scores["fall"]["prob"] if pd.notna(state_scores["fall"]["prob"]) else 0, 100 * state_scores["fall"]["prob"] if pd.notna(state_scores["fall"]["prob"]) else np.nan)
 
     render_signal_box(signal["signal"], " | ".join(signal["reasons"][:4]))
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Decision Dashboard", "Range Map / State Ladder", "Backtest vs Buy & Hold", "Diagnostics"])
-    with tab1:
-        st.markdown("<div class='soft-card'><div class='score-title'>Intraday / Repair Context</div>", unsafe_allow_html=True)
-        proxy = proxy_nymo(snapshot, prev_snapshot)
-        st.write(f"NYMO Proxy: {fmt_num(proxy['value'])} | Delta: {fmt_num(proxy['delta'])} | State: {proxy['state']}")
-        st.write(f"Recovery Score: {fmt_num(recovery_score,1)} | Canary: {canary['label']} | Cluster: {cluster_name or 'n/a'}")
-        st.markdown("</div>", unsafe_allow_html=True)
+    tabs = st.tabs(["Decision Dashboard", "Range Map / State Ladder", "Backtest vs Buy & Hold", "Diagnostics", "Holistic TSI"])
+    tab1, tab2, tab3, tab4, tab5 = tabs
 
-        st.markdown("<div class='soft-card'><div class='score-title'>Hold Trade Setup Parameters</div>", unsafe_allow_html=True)
-        render_setup_lines(long_setups, "Go LONG if these start to trigger:")
-        render_setup_lines(short_setups, "Go SHORT if these start to trigger:")
-        st.markdown("</div>", unsafe_allow_html=True)
+    with tab1:
+        left, right = st.columns([1.1, 1.2])
+        with left:
+            st.markdown("<div class='soft-card'><div class='score-title'>Intraday / Repair Context</div>", unsafe_allow_html=True)
+            proxy = proxy_nymo(snapshot, prev_snapshot)
+            st.write(f"NYMO Proxy: {fmt_num(proxy['value'])} | Delta: {fmt_num(proxy['delta'])} | State: {proxy['state']}")
+            st.write(f"Recovery Score: {fmt_num(recovery_score,1)} | Canary: {canary['label']} | Cluster: {cluster_name or 'n/a'}")
+            st.markdown("</div>", unsafe_allow_html=True)
+            render_holistic_gauge(gauge, holistic_row)
+        with right:
+            st.markdown("<div class='soft-card'><div class='score-title'>Hold Trade Setup Parameters</div>", unsafe_allow_html=True)
+            render_setup_lines(long_setups, "Go LONG if these start to trigger:")
+            render_setup_lines(short_setups, "Go SHORT if these start to trigger:")
+            st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='soft-card'><div class='score-title'>Repair Oscillator Matrix</div>", unsafe_allow_html=True)
         st.dataframe(osc_df, width='stretch', hide_index=True)
@@ -980,18 +1513,179 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab3:
-        if run_backtest:
-            st.info("Backtest placeholder in v8. Main focus here is upgraded gate/range/oscillator logic.")
+        st.markdown("<div class='soft-card'><div class='score-title'>Backtest vs Buy & Hold</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<span class='pill pill-blue'>TSI params: {tsi_long},{tsi_short},{tsi_signal}</span>"
+            f"<span class='pill pill-green'>Benchmark: {benchmark_symbol}</span>"
+            f"<span class='pill pill-yellow'>Mode: {bt_mode}</span>",
+            unsafe_allow_html=True,
+        )
+        if not run_backtest:
+            st.info("Click 'Run historical backtest' in the sidebar to generate the equity curve and lead/lag study.")
+        elif bt_df.empty:
+            st.warning("Backtest could not run. Check the uploaded history for the selected benchmark and required series.")
         else:
-            st.write("Click 'Run historical backtest' in the sidebar to run backtest logic.")
+            a, b, c, d = st.columns(4)
+            with a:
+                st.metric("Strategy Return", f"{bt_stats['strategy_return']*100:.1f}%")
+            with b:
+                st.metric("Buy & Hold Return", f"{bt_stats['buy_hold_return']*100:.1f}%")
+            with c:
+                st.metric("Strategy Max DD", f"{bt_stats['strategy_max_dd']*100:.1f}%")
+            with d:
+                st.metric("Trades", bt_stats["trades"])
+
+            fig_eq = go.Figure()
+            fig_eq.add_trace(go.Scatter(x=bt_df.index, y=bt_df["strategy_equity"], mode="lines", name="Holistic TSI Strategy"))
+            fig_eq.add_trace(go.Scatter(x=bt_df.index, y=bt_df["buy_hold_equity"], mode="lines", name=f"{benchmark_symbol} Buy & Hold"))
+            fig_eq.update_layout(height=430, title="Equity Curve", template="plotly_dark", margin=dict(l=20, r=20, t=50, b=20))
+            st.plotly_chart(fig_eq, use_container_width=True)
+
+            overlay = pd.DataFrame(index=bt_df.index)
+            overlay[f"{benchmark_symbol}_price"] = bt_df["price"]
+            overlay["holistic_tsi"] = bt_df["holistic_tsi"]
+            overlay["holistic_signal"] = bt_df["holistic_signal"]
+            overlay["price_tsi_25_13_7"] = bt_df["price_tsi"]
+            overlay["price_tsi_signal_25_13_7"] = bt_df["price_tsi_signal"]
+            fig_overlay = go.Figure()
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay[f"{benchmark_symbol}_price"], mode="lines", name=f"{benchmark_symbol} Price", yaxis="y1"))
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["holistic_tsi"], mode="lines", name="Holistic TSI", yaxis="y2"))
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["holistic_signal"], mode="lines", name="Holistic Signal", yaxis="y2"))
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["price_tsi_25_13_7"], mode="lines", name=f"{benchmark_symbol} Price TSI", yaxis="y2"))
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["price_tsi_signal_25_13_7"], mode="lines", name=f"{benchmark_symbol} Price TSI Signal", yaxis="y2"))
+            fig_overlay.update_layout(
+                title=f"Holistic TSI vs {benchmark_symbol} Price / Price TSI",
+                template="plotly_dark",
+                height=480,
+                margin=dict(l=20, r=20, t=50, b=20),
+                yaxis=dict(title="Price"),
+                yaxis2=dict(title="TSI", overlaying="y", side="right"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            )
+            fig_overlay.add_hline(y=0, line_dash="dot", line_width=1, yref="y2")
+            st.plotly_chart(fig_overlay, use_container_width=True)
+
+            lead_summary = bt_stats.get("lead_summary", {})
+            if lead_summary:
+                rows = []
+                for k, v in lead_summary.items():
+                    rows.append(
+                        {
+                            "Event": k,
+                            "Holistic Cross Lead (days)": v.get("holistic_cross_lead_days"),
+                            "Holistic Zero Lead (days)": v.get("holistic_zero_lead_days"),
+                            f"{benchmark_symbol} Price TSI Turn Lead (days)": v.get("benchmark_tsi_turn_lead_days"),
+                            "Samples": v.get("count"),
+                        }
+                    )
+                st.markdown("**Lead / Lag Event Study**")
+                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
     with tab4:
-        st.markdown("<div class='soft-card'><div class='score-title'>Band Alignment</div>", unsafe_allow_html=True)
-        st.dataframe(band_df, width='stretch', hide_index=True)
+        st.markdown("<div class='soft-card'><div class='score-title'>Diagnostics</div>", unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Cluster Diagnostics**")
+            st.write(f"Cluster: {cluster_name or 'n/a'}")
+            st.write(f"Cluster Confidence: {fmt_num(cluster_conf,2)}")
+            st.write(f"Canary Composite: {fmt_num(canary['comp'],2)}")
+            st.write(f"Canary Confidence: {fmt_num(canary['conf'],1)}")
+        with col2:
+            st.markdown("**Model Stats**")
+            st.write(f"Historical rows: {model.get('meta', {}).get('rows', 'n/a')}")
+            st.write(f"Latest date: {latest_date.date()}")
+            st.write(f"Repair breadth: {int((osc_df['Repair Score'] >= 2).sum())}/{len(osc_df) if not osc_df.empty else 0}")
+
+        if model.get("clusters", {}).get("stats"):
+            st.markdown("**Historical Cluster Summary**")
+            st.dataframe(pd.DataFrame(model["clusters"]["stats"]), width="stretch", hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("<div class='soft-card'><div class='score-title'>Current Snapshot</div>", unsafe_allow_html=True)
-        snap_show = pd.DataFrame({"Feature": sorted([k for k in snapshot.keys() if k in KEY_FEATURES or any(k.startswith(f) for f in OSC_FEATURES)]), "Value": [snapshot[k] for k in sorted([k for k in snapshot.keys() if k in KEY_FEATURES or any(k.startswith(f) for f in OSC_FEATURES)])]})
-        st.dataframe(snap_show, width='stretch', hide_index=True)
+
+    with tab5:
+        st.markdown("<div class='soft-card'><div class='score-title'>Holistic TSI</div>", unsafe_allow_html=True)
+        if holistic_hist.empty:
+            st.warning("Holistic TSI could not be built from the uploaded history.")
+        else:
+            top_left, top_mid, top_right = st.columns([1.1, 1, 1])
+            with top_left:
+                render_holistic_gauge(gauge, holistic_row)
+            with top_mid:
+                st.markdown("<div class='kpi-box'>", unsafe_allow_html=True)
+                st.markdown("<div class='score-title'>TSI State Context</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='score-value-sm'>TSI {fmt_num(holistic_row.get('holistic_tsi', np.nan),2)}</div>", unsafe_allow_html=True)
+                st.markdown(f"<span class='pill pill-blue'>Signal {fmt_num(holistic_row.get('holistic_signal', np.nan),2)}</span>", unsafe_allow_html=True)
+                st.markdown(f"<span class='pill pill-green'>Above Signal {fmt_num(holistic_row.get('pct_above_signal', np.nan),1)}%</span>", unsafe_allow_html=True)
+                st.markdown(f"<span class='pill pill-yellow'>Above Zero {fmt_num(holistic_row.get('pct_above_zero', np.nan),1)}%</span>", unsafe_allow_html=True)
+                st.markdown(f"<span class='pill pill-blue'>Slope(3) {fmt_num(holistic_row.get('slope3', np.nan),2)}</span>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+            with top_right:
+                st.markdown("<div class='kpi-box'>", unsafe_allow_html=True)
+                st.markdown("<div class='score-title'>Bucket Readout</div>", unsafe_allow_html=True)
+                for bucket in ["breadth", "leadership", "risk"]:
+                    bt_tsi = holistic_row.get(f"{bucket}_tsi", np.nan)
+                    bt_sig = holistic_row.get(f"{bucket}_signal", np.nan)
+                    pct = holistic_row.get(f"{bucket}_pct_above_signal", np.nan)
+                    st.markdown(f"<div class='tiny-muted'>{bucket.title()}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<span class='pill pill-blue'>TSI {fmt_num(bt_tsi,2)}</span><span class='pill pill-yellow'>Signal {fmt_num(bt_sig,2)}</span><span class='pill pill-green'>Aligned {fmt_num(pct,1)}%</span>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            fig_h = make_line_figure(
+                holistic_hist[["holistic_tsi", "holistic_signal", "breadth_tsi", "leadership_tsi", "risk_tsi"]].dropna(how="all"),
+                ["holistic_tsi", "holistic_signal", "breadth_tsi", "leadership_tsi", "risk_tsi"],
+                "Holistic TSI and Bucket TSIs",
+                zero_line=True,
+            )
+            st.plotly_chart(fig_h, use_container_width=True)
+
+            piv = daily_feat.pivot(index="date", columns="symbol", values="close").sort_index()
+            bench_for_overlay = benchmark_symbol if benchmark_symbol in piv.columns else "RSP"
+            overlay = holistic_hist.join(piv[[bench_for_overlay]].rename(columns={bench_for_overlay: "price"}), how="left").dropna(subset=["price"])
+            price_tsi, price_sig = true_strength_index(overlay["price"], tsi_long, tsi_short, tsi_signal)
+            fig_overlay = go.Figure()
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["price"], mode="lines", name=f"{bench_for_overlay} Price", yaxis="y1"))
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["holistic_tsi"], mode="lines", name="Holistic TSI", yaxis="y2"))
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["holistic_signal"], mode="lines", name="Holistic Signal", yaxis="y2"))
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=price_tsi, mode="lines", name=f"{bench_for_overlay} Price TSI", yaxis="y2"))
+            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=price_sig, mode="lines", name=f"{bench_for_overlay} Price TSI Signal", yaxis="y2"))
+            fig_overlay.update_layout(
+                title=f"Overlay: Holistic TSI vs {bench_for_overlay} Price and Price TSI",
+                template="plotly_dark",
+                height=500,
+                margin=dict(l=20, r=20, t=50, b=20),
+                yaxis=dict(title="Price"),
+                yaxis2=dict(title="TSI", overlaying="y", side="right"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            )
+            fig_overlay.add_hline(y=0, line_dash="dot", line_width=1, yref="y2")
+            st.plotly_chart(fig_overlay, use_container_width=True)
+
+            if not holistic_components.empty:
+                latest_comp = holistic_components[holistic_components["date"] == holistic_components["date"].max()].copy()
+                latest_comp["state"] = np.select(
+                    [
+                        (latest_comp["tsi"] > latest_comp["signal"]) & (latest_comp["tsi"] > 0),
+                        (latest_comp["tsi"] > latest_comp["signal"]) & (latest_comp["tsi"] <= 0),
+                        (latest_comp["tsi"] <= latest_comp["signal"]) & (latest_comp["tsi"] > 0),
+                        (latest_comp["tsi"] <= latest_comp["signal"]) & (latest_comp["tsi"] <= 0),
+                    ],
+                    [
+                        "Bullish regime",
+                        "Repair / bounce",
+                        "Weakening",
+                        "Bearish regime",
+                    ],
+                    default="Mixed",
+                )
+                latest_comp = latest_comp.sort_values(["bucket", "gap"], ascending=[True, False])
+                st.markdown("**Latest Component Readout**")
+                st.dataframe(
+                    latest_comp[["bucket", "symbol", "weight", "tsi", "signal", "gap", "slope3", "state"]].rename(
+                        columns={"bucket": "Bucket", "symbol": "Symbol", "weight": "Weight", "tsi": "TSI", "signal": "Signal", "gap": "Gap", "slope3": "Slope(3)", "state": "State"}
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
         st.markdown("</div>", unsafe_allow_html=True)
 
 
