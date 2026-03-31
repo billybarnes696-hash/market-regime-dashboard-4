@@ -1,8 +1,5 @@
 streamlit
 pandas
 numpy
-scikit-learn
 plotly
-pyarrow
-joblib
-scipy
+yfinance
