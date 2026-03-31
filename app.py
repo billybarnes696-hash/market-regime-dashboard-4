@@ -909,17 +909,125 @@ def build_hold_setup(snapshot: Dict[str, float], state_scores: Dict[str, Any]) -
     return {"long": dedupe_rank(long_candidates), "short": dedupe_rank(short_candidates)}
 
 
+
+
+def threshold_progress(current: float, threshold: float, direction: str) -> float:
+    if pd.isna(current) or pd.isna(threshold):
+        return np.nan
+    denom = max(abs(threshold), 1e-6)
+    if direction == "gte":
+        return float(np.clip(current / denom, 0.0, 1.5))
+    return float(np.clip(threshold / max(abs(current), 1e-6), 0.0, 1.5))
+
+
+def traffic_light(progress: float, passed: bool) -> str:
+    if passed:
+        return "🟢"
+    if pd.isna(progress):
+        return "⚪"
+    if progress >= 0.9:
+        return "🟡"
+    return "🔴"
+
+
+def build_range_hold_setup(snapshot: Dict[str, float], bands: Dict[str, Any]) -> Dict[str, List[dict]]:
+    """Create trader-usable HOLD triggers from historical band re-entry / failure levels."""
+    bounce_map = bands.get("bounce", {}) if isinstance(bands, dict) else {}
+    repair_map = bands.get("repair", {}) if isinstance(bands, dict) else {}
+    long_rows, short_rows = [], []
+
+    for feat in sorted(set(KEY_FEATURES) | set(bounce_map.keys()) | set(repair_map.keys())):
+        cur = safe_float(snapshot.get(feat, np.nan))
+        if pd.isna(cur):
+            continue
+        b = bounce_map.get(feat)
+        r = repair_map.get(feat)
+
+        # Long triggers: re-enter bounce band, then re-enter repair band
+        if feat in BULLISH_UP_FEATURES:
+            if b and pd.notna(b.get("q25", np.nan)) and cur < b["q25"]:
+                thr = float(b["q25"])
+                long_rows.append({"feature": feat, "direction": "gte", "threshold": thr, "current": cur,
+                                  "label": "re-enter bounce zone", "center": b.get("median", np.nan),
+                                  "progress": threshold_progress(cur, thr, "gte")})
+            elif r and pd.notna(r.get("q25", np.nan)) and cur < r["q25"]:
+                thr = float(r["q25"])
+                long_rows.append({"feature": feat, "direction": "gte", "threshold": thr, "current": cur,
+                                  "label": "re-enter repair zone", "center": r.get("median", np.nan),
+                                  "progress": threshold_progress(cur, thr, "gte")})
+            # Short trigger: lose bounce floor if currently above it
+            if b and pd.notna(b.get("q25", np.nan)) and cur > b["q25"]:
+                thr = float(b["q25"])
+                short_rows.append({"feature": feat, "direction": "lte", "threshold": thr, "current": cur,
+                                   "label": "lose bounce floor", "center": b.get("median", np.nan),
+                                   "progress": threshold_progress(cur, thr, "lte")})
+        elif feat in BULLISH_DOWN_FEATURES:
+            # Lower is bullish: need to fall back into bounce/repair stress ranges for long
+            if b and pd.notna(b.get("q75", np.nan)) and cur > b["q75"]:
+                thr = float(b["q75"])
+                long_rows.append({"feature": feat, "direction": "lte", "threshold": thr, "current": cur,
+                                  "label": "fear/stress cools into bounce zone", "center": b.get("median", np.nan),
+                                  "progress": threshold_progress(cur, thr, "lte")})
+            elif r and pd.notna(r.get("q75", np.nan)) and cur > r["q75"]:
+                thr = float(r["q75"])
+                long_rows.append({"feature": feat, "direction": "lte", "threshold": thr, "current": cur,
+                                  "label": "fear/stress cools into repair zone", "center": r.get("median", np.nan),
+                                  "progress": threshold_progress(cur, thr, "lte")})
+            # Short trigger: stress re-expands above bounce ceiling
+            if b and pd.notna(b.get("q75", np.nan)) and cur < b["q75"]:
+                thr = float(b["q75"])
+                short_rows.append({"feature": feat, "direction": "gte", "threshold": thr, "current": cur,
+                                   "label": "stress re-expands", "center": b.get("median", np.nan),
+                                   "progress": threshold_progress(cur, thr, "gte")})
+
+    def dedupe(rows: List[dict], n: int = 5) -> List[dict]:
+        rows = sorted(rows, key=lambda x: (abs(x["threshold"] - x["current"]) / max(abs(x["threshold"]), 1e-6), x["feature"]))
+        out, used = [], set()
+        for r in rows:
+            if r["feature"] in used:
+                continue
+            used.add(r["feature"])
+            out.append(r)
+            if len(out) >= n:
+                break
+        return out
+
+    return {"long": dedupe(long_rows), "short": dedupe(short_rows)}
+
+
+def render_gate_bar(rows: List[dict], title: str, positive: bool = True):
+    st.markdown(f"**{title}**")
+    if not rows:
+        st.markdown("- No clean triggers available from the historical ranges.")
+        return
+    for r in rows:
+        passed = gate_pass(r["current"], {"direction": r["direction"], "threshold": r["threshold"]})
+        prog = r.get("progress", np.nan)
+        light = traffic_light(prog, passed)
+        pct = 0 if pd.isna(prog) else int(min(100, max(0, round(prog * 100))))
+        color = "#22c55e" if passed else ("#f59e0b" if pct >= 90 else "#ef4444")
+        op = gate_operator_text(r["direction"])
+        st.markdown(
+            f"""
+<div style="margin:.45rem 0 .7rem 0;padding:.55rem .7rem;border:1px solid rgba(255,255,255,.08);border-radius:12px;background:rgba(255,255,255,.03);">
+  <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;">
+    <div><b>{light} {r['feature']} {op} {fmt_num(r['threshold'],3)}</b> <span style="color:#93a4cc;">({r['label']})</span></div>
+    <div style="color:#93a4cc;">now {fmt_num(r['current'],3)}</div>
+  </div>
+  <div style="margin-top:6px;height:10px;background:rgba(255,255,255,.08);border-radius:999px;overflow:hidden;">
+    <div style="height:10px;width:{pct}%;background:{color};border-radius:999px;"></div>
+  </div>
+  <div style="margin-top:4px;font-size:.84rem;color:#93a4cc;">Sweet-spot center: {fmt_num(r.get('center', np.nan),3)} • progress to trigger: {pct}%</div>
+</div>
+""",
+            unsafe_allow_html=True
+        )
 def _range_label(current: float, bounce: dict|None, repair: dict|None, regime: dict|None, feat: str) -> str:
     if pd.isna(current):
         return "No Data"
     def inside(meta):
         return meta is not None and pd.notna(meta.get("q25", np.nan)) and pd.notna(meta.get("q75", np.nan)) and meta["q25"] <= current <= meta["q75"]
     if inside(regime):
-        center = regime.get("median", np.nan)
-        if pd.notna(center) and feat in BULLISH_UP_FEATURES and current > center * 1.15:
-            return "Overheating"
-        if pd.notna(center) and feat in BULLISH_DOWN_FEATURES and current < center * 0.85:
-            return "Overheating"
         return "Regime"
     if inside(repair):
         return "Repair"
@@ -931,15 +1039,14 @@ def _range_label(current: float, bounce: dict|None, repair: dict|None, regime: d
         high = regime.get("q75", np.nan) if regime else np.nan
         if pd.notna(low) and current < low:
             return "Washout / Fall Risk"
-        if pd.notna(high) and current > high:
+        if pd.notna(high) and current > high * 1.05:
             return "Overheating"
     elif feat in BULLISH_DOWN_FEATURES:
-        # lower values are bullish for these stress gauges
         high = bounce.get("q75", np.nan) if bounce else np.nan
         low = regime.get("q25", np.nan) if regime else np.nan
         if pd.notna(high) and current > high:
             return "Washout / Fall Risk"
-        if pd.notna(low) and current < low:
+        if pd.notna(low) and current < low * 0.95:
             return "Overheating"
     return "Transitional"
 
@@ -955,6 +1062,22 @@ def build_range_map(snapshot: Dict[str, float], bands: Dict[str, Any]) -> pd.Dat
         b = bounce_map.get(feat)
         r = repair_map.get(feat)
         g = regime_map.get(feat)
+        next_long = np.nan
+        next_short = np.nan
+        if feat in BULLISH_UP_FEATURES:
+            if r and pd.notna(r.get('q25', np.nan)):
+                next_long = r.get('q25', np.nan)
+            elif b and pd.notna(b.get('q25', np.nan)):
+                next_long = b.get('q25', np.nan)
+            if b and pd.notna(b.get('q25', np.nan)):
+                next_short = b.get('q25', np.nan)
+        elif feat in BULLISH_DOWN_FEATURES:
+            if r and pd.notna(r.get('q75', np.nan)):
+                next_long = r.get('q75', np.nan)
+            elif b and pd.notna(b.get('q75', np.nan)):
+                next_long = b.get('q75', np.nan)
+            if b and pd.notna(b.get('q75', np.nan)):
+                next_short = b.get('q75', np.nan)
         rows.append({
             'Feature': feat,
             'Current': cur,
@@ -964,6 +1087,8 @@ def build_range_map(snapshot: Dict[str, float], bands: Dict[str, Any]) -> pd.Dat
             'Repair Center': fmt_num(r.get('median'),3) if r else 'n/a',
             'Regime Range': f"{fmt_num(g.get('q25'),3)} – {fmt_num(g.get('q75'),3)}" if g else 'n/a',
             'Regime Center': fmt_num(g.get('median'),3) if g else 'n/a',
+            'Next Long Trigger': fmt_num(next_long,3) if pd.notna(next_long) else 'n/a',
+            'Next Short Trigger': fmt_num(next_short,3) if pd.notna(next_short) else 'n/a',
             'State Ladder': _range_label(cur, b, r, g, feat),
         })
     return pd.DataFrame(rows)
@@ -1087,7 +1212,7 @@ def main():
 
     nymo_eff = proxy_nymo(snapshot, prev_snapshot)
     verdict = classify_signal(state_scores, canary, cluster_name, recovery["recovery_score"] if pd.notna(recovery["recovery_score"]) else 0)
-    hold_setup = build_hold_setup(snapshot, state_scores)
+    hold_setup = build_range_hold_setup(snapshot, model.get("bands", {}))
     range_df = build_range_map(snapshot, model.get("bands", {}))
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1126,27 +1251,8 @@ def main():
             st.markdown('<div class="soft-card">', unsafe_allow_html=True)
             st.markdown("**Hold Trade Setup Parameters**")
             if verdict["signal"] == "HOLD":
-                st.markdown("**Go LONG if these start to trigger:**")
-                if hold_setup["long"]:
-                    for g in hold_setup["long"]:
-                        op = gate_operator_text(g["direction"])
-                        st.markdown(
-                            f"- `{g['feature']} {op} {fmt_num(g['threshold'],3)}` (now {fmt_num(g['current'],3)}) "
-                            f"• state: {g['from_state']} • hit {fmt_num(g['hit_rate']*100,1)}%"
-                        )
-                else:
-                    st.markdown("- No clean long confirmation gates available.")
-
-                st.markdown("**Go SHORT if these start to trigger:**")
-                if hold_setup["short"]:
-                    for g in hold_setup["short"]:
-                        op = gate_operator_text(g["direction"])
-                        st.markdown(
-                            f"- `{g['feature']} {op} {fmt_num(g['threshold'],3)}` (now {fmt_num(g['current'],3)}) "
-                            f"• state: {g['from_state']} • hit {fmt_num(g['hit_rate']*100,1)}%"
-                        )
-                else:
-                    st.markdown("- No clean short deterioration gates available.")
+                render_gate_bar(hold_setup["long"], "Go LONG if these start to trigger:")
+                render_gate_bar(hold_setup["short"], "Go SHORT if these start to trigger:")
             else:
                 st.markdown("Current verdict is not HOLD; setup parameters are less relevant.")
             st.markdown('</div>', unsafe_allow_html=True)
