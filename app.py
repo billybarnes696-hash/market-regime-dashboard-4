@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Breadth Quant Engine Ultimate v12 High Contrast Holistic Gate
+Breadth Quant Engine Ultimate v13 High Contrast Holistic Gate
 - Historical gates + range map + oscillator-aware repair matrix
 - Holistic TSI (customizable) with clear high-contrast gauge
 - Unified Holistic Gate = Sweet-Spot Gates + Holistic TSI
@@ -14,6 +14,8 @@ import io
 import json
 import math
 import zipfile
+import hashlib
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,7 +32,7 @@ from sklearn.preprocessing import StandardScaler
 # -----------------------------
 # App config / style
 # -----------------------------
-st.set_page_config(page_title="Breadth Quant Engine Ultimate v12 High Contrast Holistic Gate", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Breadth Quant Engine Ultimate v13 High Contrast Holistic Gate", layout="wide", page_icon="📈")
 
 CUSTOM_CSS = """
 <style>
@@ -77,7 +79,7 @@ div[data-testid="stMetricLabel"], div[data-testid="stMetricValue"], div[data-tes
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown("""
 <div class='main-title'>
-  <div style='font-size:1.8rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v12 High Contrast Holistic Gate</div>
+  <div style='font-size:1.8rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v13 High Contrast Holistic Gate</div>
   <div class='small-muted'>Historical gates + range map + oscillator-aware repair matrix + holistic TSI + backtest.</div>
 </div>
 """, unsafe_allow_html=True)
@@ -90,6 +92,7 @@ APP_DIR.mkdir(exist_ok=True)
 HIST_DAILY_PATH = APP_DIR / "daily_history.parquet"
 HIST_WEEKLY_PATH = APP_DIR / "weekly_history.parquet"
 MODEL_PATH = APP_DIR / "learned_model.json"
+UPLOAD_LOG_PATH = APP_DIR / "upload_punch_log.csv"
 
 KEY_FEATURES = [
     "$BPSPX", "$BPSPX_%B", "$BPNYA", "$OEXA200R", "$SPXA50R", "$NYMO", "$NYSI",
@@ -171,6 +174,51 @@ def load_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text())
     except Exception:
         return default
+
+
+def file_digest(file_bytes: bytes) -> str:
+    return hashlib.md5(file_bytes).hexdigest()
+
+
+def load_upload_log() -> pd.DataFrame:
+    if not UPLOAD_LOG_PATH.exists():
+        return pd.DataFrame(columns=["uploaded_at", "kind", "file_name", "size_bytes", "md5", "rows", "symbols"])
+    try:
+        df = pd.read_csv(UPLOAD_LOG_PATH)
+        if "uploaded_at" in df.columns:
+            df["uploaded_at"] = pd.to_datetime(df["uploaded_at"], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["uploaded_at", "kind", "file_name", "size_bytes", "md5", "rows", "symbols"])
+
+
+def append_upload_log(kind: str, file_name: str, file_bytes: bytes, rows: Optional[int] = None, symbols: Optional[int] = None) -> None:
+    df = load_upload_log()
+    row = pd.DataFrame([{
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "kind": kind,
+        "file_name": file_name,
+        "size_bytes": len(file_bytes),
+        "md5": file_digest(file_bytes),
+        "rows": rows,
+        "symbols": symbols,
+    }])
+    out = pd.concat([df, row], ignore_index=True)
+    out.to_csv(UPLOAD_LOG_PATH, index=False)
+
+
+def maybe_log_upload(upload_key: str, kind: str, uploaded_file, file_bytes: Optional[bytes], rows: Optional[int] = None, symbols: Optional[int] = None) -> None:
+    if uploaded_file is None or not file_bytes:
+        return
+    session_key = "upload_log_seen"
+    if session_key not in st.session_state:
+        st.session_state[session_key] = []
+    digest = file_digest(file_bytes)
+    unique_key = f"{upload_key}:{digest}"
+    if unique_key in st.session_state[session_key]:
+        return
+    append_upload_log(kind=kind, file_name=uploaded_file.name, file_bytes=file_bytes, rows=rows, symbols=symbols)
+    st.session_state[session_key].append(unique_key)
 
 
 # -----------------------------
@@ -1484,6 +1532,18 @@ def main():
         force_rebuild = st.toggle("Force rebuild model", value=False)
         run_backtest = st.button("Run historical backtest")
         reset = st.button("Reset Model")
+        with st.expander("Upload punch log history", expanded=False):
+            upload_log_df = load_upload_log()
+            if upload_log_df.empty:
+                st.caption("No uploads logged yet.")
+            else:
+                view = upload_log_df.copy().sort_values("uploaded_at", ascending=False)
+                if "size_bytes" in view.columns:
+                    view["size_mb"] = (pd.to_numeric(view["size_bytes"], errors="coerce") / (1024 * 1024)).round(3)
+                if "md5" in view.columns:
+                    view["md5_short"] = view["md5"].astype(str).str[:8]
+                cols = [c for c in ["uploaded_at", "kind", "file_name", "size_mb", "rows", "symbols", "md5_short"] if c in view.columns]
+                st.dataframe(view[cols], width="stretch", hide_index=True)
         st.markdown("---")
         st.subheader("Holistic TSI Settings")
         tsi_long = st.number_input("TSI Long Length", min_value=5, max_value=100, value=25, step=1)
@@ -1522,10 +1582,15 @@ def main():
     else:
         tsi_window_years = int(tsi_window_label.replace("Y", ""))
 
+    hist_bytes = hist_upload.getvalue() if hist_upload is not None else None
+    snap_bytes = snap_upload.getvalue() if snap_upload is not None else None
+
     model = None
+    if hist_bytes is not None:
+        maybe_log_upload("hist", "historical_zip", hist_upload, hist_bytes)
     if hist_upload is not None and (force_rebuild or not MODEL_PATH.exists()):
         with st.spinner("Building historical model..."):
-            model = build_model_from_history_bytes(hist_upload.read())
+            model = build_model_from_history_bytes(hist_bytes)
         st.success("Historical model built.")
     if model is None:
         model = load_model()
@@ -1534,7 +1599,9 @@ def main():
         return
 
     daily_feat = pd.read_parquet(HIST_DAILY_PATH)
-    snapshot_df = parse_snapshot_csv(snap_upload.read()) if snap_upload is not None else None
+    snapshot_df = parse_snapshot_csv(snap_bytes) if snap_bytes is not None else None
+    if snap_bytes is not None and snapshot_df is not None and not snapshot_df.empty:
+        maybe_log_upload("snap", "daily_snapshot", snap_upload, snap_bytes, rows=int(len(snapshot_df)), symbols=int(snapshot_df["symbol"].nunique()))
     effective_daily_feat = apply_snapshot_to_daily_history(daily_feat, snapshot_df)
     snapshot, prev_snapshot, latest_date = build_snapshot_from_history_and_csv(daily_feat, snapshot_df)
 
