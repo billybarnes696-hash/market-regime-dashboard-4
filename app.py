@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Breadth Quant Engine Ultimate v11 High Contrast Holistic Gate
+Breadth Quant Engine Ultimate v12 High Contrast Holistic Gate
 - Historical gates + range map + oscillator-aware repair matrix
 - Holistic TSI (customizable) with clear high-contrast gauge
 - Unified Holistic Gate = Sweet-Spot Gates + Holistic TSI
@@ -30,7 +30,7 @@ from sklearn.preprocessing import StandardScaler
 # -----------------------------
 # App config / style
 # -----------------------------
-st.set_page_config(page_title="Breadth Quant Engine Ultimate v11 High Contrast Holistic Gate", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Breadth Quant Engine Ultimate v12 High Contrast Holistic Gate", layout="wide", page_icon="📈")
 
 CUSTOM_CSS = """
 <style>
@@ -77,7 +77,7 @@ div[data-testid="stMetricLabel"], div[data-testid="stMetricValue"], div[data-tes
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown("""
 <div class='main-title'>
-  <div style='font-size:1.8rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v11 High Contrast Holistic Gate</div>
+  <div style='font-size:1.8rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v12 High Contrast Holistic Gate</div>
   <div class='small-muted'>Historical gates + range map + oscillator-aware repair matrix + holistic TSI + backtest.</div>
 </div>
 """, unsafe_allow_html=True)
@@ -335,8 +335,44 @@ def parse_snapshot_csv(file_bytes: bytes) -> pd.DataFrame:
     close_col = next((c for c in ["Close", "Last", "Price", "Current", "Value"] if c in df.columns), None)
     if close_col is None:
         raise ValueError("Snapshot must include close-like column")
-    out = pd.DataFrame({"symbol": df["Symbol"].astype(str).str.strip(), "close": pd.to_numeric(df[close_col], errors="coerce")})
-    return out.dropna(subset=["close"])
+
+    syms = df["Symbol"].astype(str).str.strip().str.lower().str.replace(r"^\$", "_", regex=True)
+    syms = syms.map(lambda s: SYMBOL_MAP.get(s, s.upper()))
+    out = pd.DataFrame({"symbol": syms, "close": pd.to_numeric(df[close_col], errors="coerce")})
+    out = out.dropna(subset=["close"]).drop_duplicates(subset=["symbol"], keep="last")
+    return out
+
+
+def apply_snapshot_to_daily_history(daily_feat: pd.DataFrame, snapshot_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Apply the uploaded daily snapshot to the latest date, then fully recompute indicators.
+    This keeps the dashboard, BB%%, and Holistic TSI all on the same updated close values.
+    """
+    hist_recalc = daily_feat.copy()
+    if snapshot_df is None or snapshot_df.empty:
+        return hist_recalc
+
+    latest_date = pd.to_datetime(hist_recalc["date"]).max()
+    last_mask = pd.to_datetime(hist_recalc["date"]) == latest_date
+    snap_map = dict(zip(snapshot_df["symbol"], snapshot_df["close"]))
+
+    # Only update symbols that actually exist in the uploaded history.
+    existing_syms = set(hist_recalc["symbol"].astype(str).unique())
+    for sym, val in snap_map.items():
+        if sym not in existing_syms:
+            continue
+        m = last_mask & (hist_recalc["symbol"] == sym)
+        if not m.any():
+            continue
+        hist_recalc.loc[m, "close"] = val
+        if "high" in hist_recalc.columns:
+            hist_recalc.loc[m, "high"] = np.maximum(pd.to_numeric(hist_recalc.loc[m, "high"], errors="coerce"), val)
+        if "low" in hist_recalc.columns:
+            hist_recalc.loc[m, "low"] = np.minimum(pd.to_numeric(hist_recalc.loc[m, "low"], errors="coerce"), val)
+        if "open" in hist_recalc.columns:
+            hist_recalc.loc[m, "open"] = pd.to_numeric(hist_recalc.loc[m, "open"], errors="coerce")
+
+    hist_recalc = add_indicator_features(hist_recalc)
+    return hist_recalc
 
 
 # -----------------------------
@@ -694,6 +730,7 @@ def build_model_from_history(daily: pd.DataFrame, weekly: pd.DataFrame) -> Dict[
 # Current snapshot / evaluation
 # -----------------------------
 def build_snapshot_from_history_and_csv(daily_feat: pd.DataFrame, snapshot_df: Optional[pd.DataFrame]) -> Tuple[Dict[str, float], Dict[str, float], pd.Timestamp]:
+    daily_feat = apply_snapshot_to_daily_history(daily_feat, snapshot_df)
     piv_close = daily_feat.pivot(index="date", columns="symbol", values="close")
     piv_pb = daily_feat.pivot(index="date", columns="symbol", values="pct_b20")
     piv_rsi = daily_feat.pivot(index="date", columns="symbol", values="rsi14")
@@ -701,22 +738,6 @@ def build_snapshot_from_history_and_csv(daily_feat: pd.DataFrame, snapshot_df: O
     piv_mh = daily_feat.pivot(index="date", columns="symbol", values="macd_hist")
     latest_date = pd.to_datetime(daily_feat["date"]).max()
     prior_date = pd.to_datetime(daily_feat[daily_feat["date"] < latest_date]["date"]).max()
-
-    if snapshot_df is not None and not snapshot_df.empty:
-        snap_map = dict(zip(snapshot_df["symbol"], snapshot_df["close"]))
-        hist_recalc = daily_feat.copy()
-        last_mask = hist_recalc["date"] == latest_date
-        for sym, val in snap_map.items():
-            m = last_mask & (hist_recalc["symbol"] == sym)
-            hist_recalc.loc[m, "close"] = val
-            hist_recalc.loc[m, "high"] = np.maximum(hist_recalc.loc[m, "high"], val)
-            hist_recalc.loc[m, "low"] = np.minimum(hist_recalc.loc[m, "low"], val)
-        recalc = add_indicator_features(hist_recalc)
-        piv_pb = recalc.pivot(index="date", columns="symbol", values="pct_b20")
-        piv_rsi = recalc.pivot(index="date", columns="symbol", values="rsi14")
-        piv_cci = recalc.pivot(index="date", columns="symbol", values="cci20")
-        piv_mh = recalc.pivot(index="date", columns="symbol", values="macd_hist")
-        piv_close = recalc.pivot(index="date", columns="symbol", values="close")
 
     snapshot, prior = {}, {}
     for sym in piv_close.columns:
@@ -1514,6 +1535,7 @@ def main():
 
     daily_feat = pd.read_parquet(HIST_DAILY_PATH)
     snapshot_df = parse_snapshot_csv(snap_upload.read()) if snap_upload is not None else None
+    effective_daily_feat = apply_snapshot_to_daily_history(daily_feat, snapshot_df)
     snapshot, prev_snapshot, latest_date = build_snapshot_from_history_and_csv(daily_feat, snapshot_df)
 
     state_scores = {state: evaluate_state(snapshot, model["states"][state]) for state in ["bounce", "repair", "regime", "fall"]}
@@ -1552,7 +1574,7 @@ def main():
     long_setups = nearest_confirmation_from_ranges(snapshot, model.get("bands", {}), bullish=True)
     short_setups = nearest_confirmation_from_ranges(snapshot, model.get("bands", {}), bullish=False)
 
-    holistic_hist, holistic_components = compute_holistic_tsi_history(daily_feat, tsi_long, tsi_short, tsi_signal)
+    holistic_hist, holistic_components = compute_holistic_tsi_history(effective_daily_feat, tsi_long, tsi_short, tsi_signal)
     holistic_row = holistic_hist.loc[holistic_hist.index.max()] if not holistic_hist.empty else pd.Series(dtype=float)
     gauge = holistic_gauge_state(holistic_row)
     holistic_gate = compute_holistic_gate(state_scores, gauge)
