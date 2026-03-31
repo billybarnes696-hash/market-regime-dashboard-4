@@ -1557,6 +1557,15 @@ def main():
     gauge = holistic_gauge_state(holistic_row)
     holistic_gate = compute_holistic_gate(state_scores, gauge)
 
+    # Apply the user-selected chart window to the TSI history/components so the plots stay readable.
+    holistic_hist_plot = holistic_hist.copy()
+    holistic_components_plot = holistic_components.copy()
+    if tsi_window_years is not None and not holistic_hist_plot.empty:
+        cutoff = holistic_hist_plot.index.max() - pd.Timedelta(days=int(365.25 * float(tsi_window_years)))
+        holistic_hist_plot = holistic_hist_plot.loc[holistic_hist_plot.index >= cutoff].copy()
+        if not holistic_components_plot.empty and "date" in holistic_components_plot.columns:
+            holistic_components_plot = holistic_components_plot.loc[pd.to_datetime(holistic_components_plot["date"]) >= cutoff].copy()
+
     bt_df, bt_stats = (pd.DataFrame(), {})
     if run_backtest and not holistic_hist.empty:
         bt_df, bt_stats = run_holistic_backtest(
