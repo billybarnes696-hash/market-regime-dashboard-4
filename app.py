@@ -908,6 +908,66 @@ def build_hold_setup(snapshot: Dict[str, float], state_scores: Dict[str, Any]) -
 
     return {"long": dedupe_rank(long_candidates), "short": dedupe_rank(short_candidates)}
 
+
+def _range_label(current: float, bounce: dict|None, repair: dict|None, regime: dict|None, feat: str) -> str:
+    if pd.isna(current):
+        return "No Data"
+    def inside(meta):
+        return meta is not None and pd.notna(meta.get("q25", np.nan)) and pd.notna(meta.get("q75", np.nan)) and meta["q25"] <= current <= meta["q75"]
+    if inside(regime):
+        center = regime.get("median", np.nan)
+        if pd.notna(center) and feat in BULLISH_UP_FEATURES and current > center * 1.15:
+            return "Overheating"
+        if pd.notna(center) and feat in BULLISH_DOWN_FEATURES and current < center * 0.85:
+            return "Overheating"
+        return "Regime"
+    if inside(repair):
+        return "Repair"
+    if inside(bounce):
+        return "Bounce"
+    # outside learned bands
+    if feat in BULLISH_UP_FEATURES:
+        low = bounce.get("q25", np.nan) if bounce else np.nan
+        high = regime.get("q75", np.nan) if regime else np.nan
+        if pd.notna(low) and current < low:
+            return "Washout / Fall Risk"
+        if pd.notna(high) and current > high:
+            return "Overheating"
+    elif feat in BULLISH_DOWN_FEATURES:
+        # lower values are bullish for these stress gauges
+        high = bounce.get("q75", np.nan) if bounce else np.nan
+        low = regime.get("q25", np.nan) if regime else np.nan
+        if pd.notna(high) and current > high:
+            return "Washout / Fall Risk"
+        if pd.notna(low) and current < low:
+            return "Overheating"
+    return "Transitional"
+
+
+def build_range_map(snapshot: Dict[str, float], bands: Dict[str, Any]) -> pd.DataFrame:
+    rows=[]
+    bounce_map=bands.get('bounce', {}) if isinstance(bands, dict) else {}
+    repair_map=bands.get('repair', {}) if isinstance(bands, dict) else {}
+    regime_map=bands.get('regime', {}) if isinstance(bands, dict) else {}
+    all_feats = sorted(set(KEY_FEATURES) | set(bounce_map.keys()) | set(repair_map.keys()) | set(regime_map.keys()))
+    for feat in all_feats:
+        cur = safe_float(snapshot.get(feat, np.nan))
+        b = bounce_map.get(feat)
+        r = repair_map.get(feat)
+        g = regime_map.get(feat)
+        rows.append({
+            'Feature': feat,
+            'Current': cur,
+            'Bounce Range': f"{fmt_num(b.get('q25'),3)} – {fmt_num(b.get('q75'),3)}" if b else 'n/a',
+            'Bounce Center': fmt_num(b.get('median'),3) if b else 'n/a',
+            'Repair Range': f"{fmt_num(r.get('q25'),3)} – {fmt_num(r.get('q75'),3)}" if r else 'n/a',
+            'Repair Center': fmt_num(r.get('median'),3) if r else 'n/a',
+            'Regime Range': f"{fmt_num(g.get('q25'),3)} – {fmt_num(g.get('q75'),3)}" if g else 'n/a',
+            'Regime Center': fmt_num(g.get('median'),3) if g else 'n/a',
+            'State Ladder': _range_label(cur, b, r, g, feat),
+        })
+    return pd.DataFrame(rows)
+
 # =============================================================================
 # Backtest
 # =============================================================================
@@ -1103,6 +1163,15 @@ def main():
             st.markdown('</div>', unsafe_allow_html=True)
 
     with tab2:
+        st.markdown("**Range Map / State Ladder**")
+        if range_df.empty:
+            st.info("No range map available.")
+        else:
+            summary = range_df["State Ladder"].value_counts().rename_axis("State").reset_index(name="Count")
+            st.dataframe(summary, width='stretch', hide_index=True)
+            st.dataframe(range_df, width='stretch', hide_index=True)
+
+    with tab3:
         if run_bt:
             with st.spinner("Running historical backtest..."):
                 bt_rsp = run_backtest(daily_feat, use_spy=False)
@@ -1121,7 +1190,7 @@ def main():
         else:
             st.info("Click **Run historical backtest** in the sidebar to compute strategy vs buy & hold.")
 
-    with tab3:
+    with tab4:
         st.markdown("**Band Alignment**")
         st.dataframe(band_df, width='stretch', hide_index=True)
         st.markdown("**Passed Bounce/Repair/Regime/Fall Gates**")
