@@ -1468,6 +1468,8 @@ def main():
         tsi_long = st.number_input("TSI Long Length", min_value=5, max_value=100, value=25, step=1)
         tsi_short = st.number_input("TSI Short Length", min_value=2, max_value=50, value=13, step=1)
         tsi_signal = st.number_input("TSI Signal Length", min_value=2, max_value=30, value=7, step=1)
+        tsi_window_label = st.selectbox("TSI Chart Window", ["6M", "1Y", "2Y", "3Y", "5Y", "10Y", "MAX", "Custom"], index=2)
+        tsi_custom_years = st.number_input("Custom TSI chart years", min_value=1, max_value=30, value=2, step=1, disabled=(tsi_window_label != "Custom"))
         benchmark_symbol = st.selectbox("Backtest Benchmark", ["RSP", "SPY"], index=0)
         bt_mode = st.selectbox("Backtest Mode", ["Long / Cash", "Long / Short"], index=0)
         bt_logic = st.selectbox("Signal Logic", ["Cross vs signal", "Cross zero", "Either"], index=0)
@@ -1475,8 +1477,6 @@ def main():
         bt_min_align = st.slider("Min component alignment %", 0, 100, 50, 5)
         bt_lookback_label = st.selectbox("Backtest Lookback", ["1Y", "2Y", "3Y", "5Y", "10Y", "20Y", "MAX", "Custom"], index=0)
         bt_custom_years = st.number_input("Custom backtest years", min_value=1, max_value=30, value=7, step=1, disabled=(bt_lookback_label != "Custom"))
-        tsi_view_label = st.selectbox("TSI Chart Window", ["6M", "1Y", "2Y", "3Y", "5Y", "10Y", "MAX", "Custom"], index=1)
-        tsi_custom_years = st.number_input("Custom TSI chart years", min_value=1, max_value=30, value=3, step=1, disabled=(tsi_view_label != "Custom"))
 
         if reset:
             for p in [HIST_DAILY_PATH, HIST_WEEKLY_PATH, MODEL_PATH]:
@@ -1492,18 +1492,14 @@ def main():
     else:
         bt_lookback_years = int(bt_lookback_label.replace("Y", ""))
 
-    if tsi_view_label == "MAX":
-        tsi_view_years = None
-        tsi_view_months = None
-    elif tsi_view_label == "Custom":
-        tsi_view_years = int(tsi_custom_years)
-        tsi_view_months = None
-    elif tsi_view_label == "6M":
-        tsi_view_years = None
-        tsi_view_months = 6
+    if tsi_window_label == "MAX":
+        tsi_window_years = None
+    elif tsi_window_label == "Custom":
+        tsi_window_years = int(tsi_custom_years)
+    elif tsi_window_label == "6M":
+        tsi_window_years = 0.5
     else:
-        tsi_view_years = int(tsi_view_label.replace("Y", ""))
-        tsi_view_months = None
+        tsi_window_years = int(tsi_window_label.replace("Y", ""))
 
     model = None
     if hist_upload is not None and (force_rebuild or not MODEL_PATH.exists()):
@@ -1590,118 +1586,37 @@ def main():
     with gate_right:
         render_signal_box(signal["signal"], " | ".join(signal["reasons"][:3]))
 
-    tabs = st.tabs(["Decision Dashboard", "Holistic TSI", "Backtest vs Buy & Hold", "Range Map / State Ladder", "Diagnostics"])
+    tabs = st.tabs(["Decision Dashboard", "Range Map / State Ladder", "Backtest vs Buy & Hold", "Diagnostics", "Holistic TSI"])
     tab1, tab2, tab3, tab4, tab5 = tabs
 
     with tab1:
-        summary_left, summary_right = st.columns([1.0, 1.0])
-        with summary_left:
+        left, right = st.columns([1.1, 1.2])
+        with left:
             render_holistic_gate_card(holistic_gate, state_scores)
-        with summary_right:
-            render_signal_box(signal["signal"], " | ".join(signal["reasons"][:3]))
             st.markdown("<div class='soft-card'><div class='score-title'>Intraday / Repair Context</div>", unsafe_allow_html=True)
             proxy = proxy_nymo(snapshot, prev_snapshot)
             st.write(f"NYMO Proxy: {fmt_num(proxy['value'])} | Delta: {fmt_num(proxy['delta'])} | State: {proxy['state']}")
             st.write(f"Recovery Score: {fmt_num(recovery_score,1)} | Canary: {canary['label']} | Cluster: {cluster_name or 'n/a'}")
             st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("<div class='soft-card'><div class='score-title'>Trade Setup Parameters</div>", unsafe_allow_html=True)
-        trade_left, trade_right = st.columns(2)
-        with trade_left:
+            render_holistic_gauge(gauge, holistic_row)
+        with right:
+            st.markdown("<div class='soft-card'><div class='score-title'>Hold Trade Setup Parameters</div>", unsafe_allow_html=True)
             render_setup_lines(long_setups, "Go LONG if these start to trigger:")
-        with trade_right:
             render_setup_lines(short_setups, "Go SHORT if these start to trigger:")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='soft-card'><div class='score-title'>Repair Oscillator Matrix</div>", unsafe_allow_html=True)
+        st.dataframe(osc_df, width='stretch', hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        with st.expander("Repair Oscillator Matrix", expanded=False):
-            st.dataframe(osc_df, width='stretch', hide_index=True)
-
     with tab2:
-        st.markdown("<div class='soft-card'><div class='score-title'>Holistic TSI</div>", unsafe_allow_html=True)
-        if holistic_hist.empty:
-            st.warning("Holistic TSI could not be built from the uploaded history.")
+        st.markdown("<div class='soft-card'><div class='score-title'>Range Map / State Ladder</div>", unsafe_allow_html=True)
+        if not range_df.empty:
+            summary = range_df["State Ladder"].value_counts().rename_axis("State").reset_index(name="Count")
+            st.dataframe(summary, width='stretch', hide_index=True)
+            st.dataframe(range_df, width='stretch', hide_index=True)
         else:
-            view_hist = holistic_hist.copy()
-            if tsi_view_months is not None and not view_hist.empty:
-                cutoff = view_hist.index.max() - pd.DateOffset(months=int(tsi_view_months))
-                view_hist = view_hist[view_hist.index >= cutoff]
-            elif tsi_view_years is not None and not view_hist.empty:
-                cutoff = view_hist.index.max() - pd.DateOffset(years=int(tsi_view_years))
-                view_hist = view_hist[view_hist.index >= cutoff]
-
-            top_left, top_mid, top_right = st.columns([1.1, 1, 1])
-            with top_left:
-                render_holistic_gauge(gauge, holistic_row)
-            with top_mid:
-                st.markdown("<div class='kpi-box'>", unsafe_allow_html=True)
-                st.markdown("<div class='score-title'>TSI State Context</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='score-value-sm'>TSI {fmt_num(holistic_row.get('holistic_tsi', np.nan),2)}</div>", unsafe_allow_html=True)
-                st.markdown(f"<span class='pill pill-blue'>Signal {fmt_num(holistic_row.get('holistic_signal', np.nan),2)}</span>", unsafe_allow_html=True)
-                st.markdown(f"<span class='pill pill-green'>Above Signal {fmt_num(holistic_row.get('pct_above_signal', np.nan),1)}%</span>", unsafe_allow_html=True)
-                st.markdown(f"<span class='pill pill-yellow'>Above Zero {fmt_num(holistic_row.get('pct_above_zero', np.nan),1)}%</span>", unsafe_allow_html=True)
-                st.markdown(f"<span class='pill pill-blue'>Slope(3) {fmt_num(holistic_row.get('slope3', np.nan),2)}</span>", unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
-            with top_right:
-                st.markdown("<div class='kpi-box'>", unsafe_allow_html=True)
-                st.markdown("<div class='score-title'>Bucket Readout</div>", unsafe_allow_html=True)
-                st.markdown(f"<span class='pill pill-blue'>Window: {tsi_view_label if tsi_view_label != 'Custom' else str(tsi_custom_years)+'Y'}</span>", unsafe_allow_html=True)
-                for bucket in ["breadth", "leadership", "risk"]:
-                    bt_tsi = holistic_row.get(f"{bucket}_tsi", np.nan)
-                    bt_sig = holistic_row.get(f"{bucket}_signal", np.nan)
-                    pct = holistic_row.get(f"{bucket}_pct_above_signal", np.nan)
-                    st.markdown(f"<div class='tiny-muted'>{bucket.title()}</div>", unsafe_allow_html=True)
-                    st.markdown(f"<span class='pill pill-blue'>TSI {fmt_num(bt_tsi,2)}</span><span class='pill pill-yellow'>Signal {fmt_num(bt_sig,2)}</span><span class='pill pill-green'>Aligned {fmt_num(pct,1)}%</span>", unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
-
-            fig_h = make_line_figure(
-                view_hist[["holistic_tsi", "holistic_signal", "breadth_tsi", "leadership_tsi", "risk_tsi"]].dropna(how="all"),
-                ["holistic_tsi", "holistic_signal", "breadth_tsi", "leadership_tsi", "risk_tsi"],
-                "Holistic TSI and Bucket TSIs",
-                zero_line=True,
-            )
-            st.plotly_chart(fig_h, use_container_width=True)
-
-            piv = daily_feat.pivot(index="date", columns="symbol", values="close").sort_index()
-            bench_for_overlay = benchmark_symbol if benchmark_symbol in piv.columns else "RSP"
-            overlay = holistic_hist.join(piv[[bench_for_overlay]].rename(columns={bench_for_overlay: "price"}), how="left").dropna(subset=["price"])
-            if tsi_view_months is not None and not overlay.empty:
-                cutoff = overlay.index.max() - pd.DateOffset(months=int(tsi_view_months))
-                overlay = overlay[overlay.index >= cutoff]
-            elif tsi_view_years is not None and not overlay.empty:
-                cutoff = overlay.index.max() - pd.DateOffset(years=int(tsi_view_years))
-                overlay = overlay[overlay.index >= cutoff]
-            price_tsi, price_sig = true_strength_index(overlay["price"], tsi_long, tsi_short, tsi_signal)
-            fig_overlay = go.Figure()
-            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["price"], mode="lines", name=f"{bench_for_overlay} Price", yaxis="y1"))
-            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["holistic_tsi"], mode="lines", name="Holistic TSI", yaxis="y2"))
-            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=overlay["holistic_signal"], mode="lines", name="Holistic Signal", yaxis="y2"))
-            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=price_tsi, mode="lines", name=f"{bench_for_overlay} Price TSI", yaxis="y2"))
-            fig_overlay.add_trace(go.Scatter(x=overlay.index, y=price_sig, mode="lines", name=f"{bench_for_overlay} Price TSI Signal", yaxis="y2"))
-            fig_overlay.update_layout(
-                title=f"Overlay: Holistic TSI vs {bench_for_overlay} Price and Price TSI",
-                template="plotly_dark",
-                height=500,
-                margin=dict(l=20, r=20, t=50, b=20),
-                yaxis=dict(title="Price"),
-                yaxis2=dict(title="TSI", overlaying="y", side="right"),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            )
-            fig_overlay.add_hline(y=0, line_dash="dot", line_width=1, yref="y2")
-            st.plotly_chart(fig_overlay, use_container_width=True)
-
-            if not holistic_components.empty:
-                latest_comp = holistic_components[holistic_components["date"] == holistic_components["date"].max()].copy()
-                latest_comp["state"] = np.select(
-                    [
-                        (latest_comp["tsi"] > latest_comp["signal"]) & (latest_comp["tsi"] > 0),
-                        (latest_comp["tsi"] > latest_comp["signal"]) & (latest_comp["tsi"] <= 0),
-                        (latest_comp["tsi"] <= latest_comp["signal"]) & (latest_comp["tsi"] > 0),
-                    ],
-                    ["Bullish above zero", "Bullish below zero", "Rolling above zero"],
-                    default="Bearish",
-                )
-                st.markdown("**Latest Component States**")
-                st.dataframe(latest_comp[["bucket", "tsi", "signal", "pct_above_signal", "pct_above_zero", "slope3", "state"]], width="stretch", hide_index=True)
+            st.write("No range map available.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab3:
@@ -1776,16 +1691,6 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab4:
-        st.markdown("<div class='soft-card'><div class='score-title'>Range Map / State Ladder</div>", unsafe_allow_html=True)
-        if not range_df.empty:
-            summary = range_df["State Ladder"].value_counts().rename_axis("State").reset_index(name="Count")
-            st.dataframe(summary, width='stretch', hide_index=True)
-            st.dataframe(range_df, width='stretch', hide_index=True)
-        else:
-            st.write("No range map available.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab5:
         st.markdown("<div class='soft-card'><div class='score-title'>Diagnostics</div>", unsafe_allow_html=True)
         col1, col2 = st.columns(2)
         with col1:
@@ -1805,5 +1710,82 @@ def main():
             st.dataframe(pd.DataFrame(model["clusters"]["stats"]), width="stretch", hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
+    with tab5:
+        st.markdown("<div class='soft-card'><div class='score-title'>Holistic TSI</div>", unsafe_allow_html=True)
+        if holistic_hist.empty:
+            st.warning("Holistic TSI could not be built from the uploaded history.")
+        else:
+            head_left, head_right = st.columns([1, 1.2])
+            with head_left:
+                render_holistic_gauge(gauge, holistic_row)
+            with head_right:
+                st.markdown("<div class='kpi-box'>", unsafe_allow_html=True)
+                st.markdown("<div class='score-title'>Simple TSI Readout</div>", unsafe_allow_html=True)
+                st.markdown(f"<span class='pill pill-blue'>Window: {tsi_window_label if tsi_window_label != 'Custom' else str(tsi_custom_years)+'Y'}</span>", unsafe_allow_html=True)
+                st.markdown(f"<span class='pill pill-blue'>TSI params: {tsi_long},{tsi_short},{tsi_signal}</span>", unsafe_allow_html=True)
+                st.markdown(f"<span class='pill pill-green'>Holistic TSI {fmt_num(holistic_row.get('holistic_tsi', np.nan),2)}</span>", unsafe_allow_html=True)
+                st.markdown(f"<span class='pill pill-yellow'>Signal {fmt_num(holistic_row.get('holistic_signal', np.nan),2)}</span>", unsafe_allow_html=True)
+                st.markdown("<div class='tiny-muted'>Only the two smooth lines are shown so the bull/bear cross is easy to see.</div>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            plot_df = holistic_hist_plot[["holistic_tsi", "holistic_signal"]].dropna(how="all").copy()
+            fig_h = go.Figure()
+            fig_h.add_trace(go.Scatter(x=plot_df.index, y=plot_df["holistic_tsi"], mode="lines", name="Holistic TSI", line=dict(width=3)))
+            fig_h.add_trace(go.Scatter(x=plot_df.index, y=plot_df["holistic_signal"], mode="lines", name="Signal", line=dict(width=2)))
+            fig_h.add_hline(y=0, line_dash="dot", line_width=1)
+            fig_h.update_layout(
+                title=f"Holistic TSI ({tsi_long},{tsi_short},{tsi_signal})",
+                template="plotly_dark",
+                height=430,
+                margin=dict(l=20, r=20, t=50, b=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                xaxis_title="Date",
+                yaxis_title="TSI",
+            )
+            st.plotly_chart(fig_h, use_container_width=True)
+
+            piv = daily_feat.pivot(index="date", columns="symbol", values="close").sort_index()
+            bench_for_overlay = benchmark_symbol if benchmark_symbol in piv.columns else "RSP"
+            overlay = holistic_hist_plot.join(piv[[bench_for_overlay]].rename(columns={bench_for_overlay: "price"}), how="left").dropna(subset=["price"])
+            price_tsi, price_sig = true_strength_index(overlay["price"], tsi_long, tsi_short, tsi_signal)
+            fig_price_tsi = go.Figure()
+            fig_price_tsi.add_trace(go.Scatter(x=overlay.index, y=price_tsi, mode="lines", name=f"{bench_for_overlay} Price TSI", line=dict(width=3)))
+            fig_price_tsi.add_trace(go.Scatter(x=overlay.index, y=price_sig, mode="lines", name=f"{bench_for_overlay} Signal", line=dict(width=2)))
+            fig_price_tsi.add_hline(y=0, line_dash="dot", line_width=1)
+            fig_price_tsi.update_layout(
+                title=f"{bench_for_overlay} Price TSI ({tsi_long},{tsi_short},{tsi_signal})",
+                template="plotly_dark",
+                height=430,
+                margin=dict(l=20, r=20, t=50, b=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                xaxis_title="Date",
+                yaxis_title="TSI",
+            )
+            st.plotly_chart(fig_price_tsi, use_container_width=True)
+
+            with st.expander("Show bucket and component detail"):
+                bucket_cols = [c for c in ["breadth_tsi", "breadth_signal", "leadership_tsi", "leadership_signal", "risk_tsi", "risk_signal", "pct_above_signal", "pct_above_zero", "slope3"] if c in holistic_hist_plot.columns]
+                if bucket_cols:
+                    st.dataframe(holistic_hist_plot[bucket_cols].tail(20).reset_index(), width="stretch", hide_index=True)
+                if not holistic_components_plot.empty:
+                    latest_comp = holistic_components_plot[holistic_components_plot["date"] == holistic_components_plot["date"].max()].copy()
+                    latest_comp["state"] = np.select(
+                        [
+                            (latest_comp["tsi"] > latest_comp["signal"]) & (latest_comp["tsi"] > 0),
+                            (latest_comp["tsi"] > latest_comp["signal"]) & (latest_comp["tsi"] <= 0),
+                            (latest_comp["tsi"] <= latest_comp["signal"]) & (latest_comp["tsi"] > 0),
+                            (latest_comp["tsi"] <= latest_comp["signal"]) & (latest_comp["tsi"] <= 0),
+                        ],
+                        ["Bullish regime", "Repair / bounce", "Weakening", "Bearish regime"],
+                        default="Mixed",
+                    )
+                    latest_comp = latest_comp.sort_values(["bucket", "gap"], ascending=[True, False])
+                    detail_cols = [c for c in ["bucket", "symbol", "weight", "tsi", "signal", "gap", "slope3", "state"] if c in latest_comp.columns]
+                    if detail_cols:
+                        st.dataframe(latest_comp[detail_cols], width="stretch", hide_index=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
 if __name__ == "__main__":
+
     main()
