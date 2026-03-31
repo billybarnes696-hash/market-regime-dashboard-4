@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Breadth Quant Engine Ultimate v10 High Contrast Holistic Gate
+Breadth Quant Engine Ultimate v11 High Contrast Holistic Gate
 - Historical gates + range map + oscillator-aware repair matrix
 - Holistic TSI (customizable) with clear high-contrast gauge
 - Unified Holistic Gate = Sweet-Spot Gates + Holistic TSI
@@ -30,7 +30,7 @@ from sklearn.preprocessing import StandardScaler
 # -----------------------------
 # App config / style
 # -----------------------------
-st.set_page_config(page_title="Breadth Quant Engine Ultimate v10 High Contrast Holistic Gate", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Breadth Quant Engine Ultimate v11 High Contrast Holistic Gate", layout="wide", page_icon="📈")
 
 CUSTOM_CSS = """
 <style>
@@ -77,7 +77,7 @@ div[data-testid="stMetricLabel"], div[data-testid="stMetricValue"], div[data-tes
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown("""
 <div class='main-title'>
-  <div style='font-size:1.8rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v10 High Contrast Holistic Gate</div>
+  <div style='font-size:1.8rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v11 High Contrast Holistic Gate</div>
   <div class='small-muted'>Historical gates + range map + oscillator-aware repair matrix + holistic TSI + backtest.</div>
 </div>
 """, unsafe_allow_html=True)
