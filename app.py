@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Breadth Quant Engine Ultimate v9
+Breadth Quant Engine Ultimate v10 High Contrast Holistic Gate
 - Historical gates + range map + oscillator-aware repair matrix
-- Holistic TSI (customizable) with simple tradable gauge
+- Holistic TSI (customizable) with clear high-contrast gauge
+- Unified Holistic Gate = Sweet-Spot Gates + Holistic TSI
 - Backtest vs RSP / SPY using holistic TSI signals
 """
 
@@ -29,49 +30,54 @@ from sklearn.preprocessing import StandardScaler
 # -----------------------------
 # App config / style
 # -----------------------------
-st.set_page_config(page_title="Breadth Quant Engine Ultimate v9", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Breadth Quant Engine Ultimate v10 High Contrast Holistic Gate", layout="wide", page_icon="📈")
 
 CUSTOM_CSS = """
 <style>
 :root{
-  --bg:#0b1020;--panel:#111936;--text:#ecf2ff;--muted:#98abd5;
-  --green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--blue:#38bdf8;
-  --soft-green:rgba(34,197,94,.12);--soft-yellow:rgba(245,158,11,.12);--soft-red:rgba(239,68,68,.12);
+  --bg:#050814;--panel:#0d1428;--panel2:#111a33;--text:#ffffff;--muted:#c7d2fe;
+  --green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--blue:#38bdf8;--orange:#fb923c;
 }
-.block-container{padding-top:1rem;padding-bottom:2rem;max-width:1500px;}
-.main-title{padding:1rem 1.2rem;border-radius:18px;background:linear-gradient(135deg, rgba(56,189,248,.18), rgba(167,139,250,.18));border:1px solid rgba(148,163,184,.22);margin-bottom:1rem;}
-.soft-card{background:linear-gradient(180deg, rgba(17,25,54,.96), rgba(10,17,38,.98));border:1px solid rgba(148,163,184,.24);border-radius:18px;padding:1rem;box-shadow:0 10px 35px rgba(0,0,0,.22);margin-bottom:1rem;}
-.score-title{color:#bcd0ff;font-size:1.02rem;font-weight:800;}
-.score-value{font-size:2.2rem;font-weight:950;color:#fff;margin:.35rem 0;}
-.score-value-sm{font-size:1.35rem;font-weight:900;color:#fff;margin:.2rem 0;}
-.small-muted{color:#93a4cc;font-size:.88rem;}
-.tiny-muted{color:#93a4cc;font-size:.78rem;}
-.pill{display:inline-block;padding:.3rem .6rem;border-radius:999px;font-size:.82rem;font-weight:700;border:1px solid rgba(255,255,255,.12);margin-right:.35rem;margin-bottom:.25rem;}
-.pill-green{background:rgba(34,197,94,.16);color:#bbf7d0;}
-.pill-yellow{background:rgba(245,158,11,.16);color:#fde68a;}
-.pill-red{background:rgba(239,68,68,.16);color:#fecaca;}
-.pill-blue{background:rgba(56,189,248,.16);color:#c6f1ff;}
-.setup-line{padding:.45rem .55rem;border-radius:10px;margin:.28rem 0;border:1px solid rgba(255,255,255,.08);}
-.setup-pass{background:rgba(34,197,94,.10);}
-.setup-near{background:rgba(245,158,11,.10);}
-.setup-far{background:rgba(239,68,68,.10);}
-.bar{height:8px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:.25rem;}
-.fill-green{height:100%;background:linear-gradient(90deg,#22c55e,#4ade80);}
-.fill-yellow{height:100%;background:linear-gradient(90deg,#f59e0b,#fbbf24);}
-.fill-red{height:100%;background:linear-gradient(90deg,#ef4444,#f87171);}
-.gauge-wrap{padding:.25rem 0 .1rem 0;}
-.gauge-track{height:22px;border-radius:999px;background:linear-gradient(90deg,#ef4444 0%, #f59e0b 35%, #94a3b8 50%, #f59e0b 65%, #22c55e 100%);position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.08);}
-.gauge-marker{position:absolute;top:-3px;width:10px;height:28px;border-radius:8px;background:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.15),0 2px 12px rgba(255,255,255,.3);}
-.kpi-box{padding:.75rem;border-radius:14px;border:1px solid rgba(148,163,184,.18);background:rgba(255,255,255,.03);}
-.state-green{background:var(--soft-green);}
-.state-yellow{background:var(--soft-yellow);}
-.state-red{background:var(--soft-red);}
+html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {background:var(--bg); color:var(--text);}
+.block-container{padding-top:1rem;padding-bottom:2rem;max-width:1560px;}
+.main-title{padding:1.1rem 1.25rem;border-radius:18px;background:linear-gradient(135deg, rgba(56,189,248,.22), rgba(167,139,250,.24));border:1px solid rgba(255,255,255,.18);margin-bottom:1rem;box-shadow:0 12px 34px rgba(0,0,0,.28);}
+.soft-card{background:linear-gradient(180deg, rgba(14,20,40,.99), rgba(8,13,27,.99));border:1px solid rgba(255,255,255,.18);border-radius:18px;padding:1rem 1rem .95rem 1rem;box-shadow:0 14px 36px rgba(0,0,0,.30);margin-bottom:1rem;}
+.score-title{color:#dbeafe;font-size:1.02rem;font-weight:900;letter-spacing:.02em;text-transform:uppercase;}
+.score-value{font-size:2.55rem;line-height:1.05;font-weight:1000;color:#ffffff;margin:.35rem 0;text-shadow:0 1px 0 rgba(0,0,0,.4);}
+.score-value-sm{font-size:1.55rem;line-height:1.15;font-weight:950;color:#ffffff;margin:.2rem 0;}
+.small-muted{color:#cbd5e1;font-size:.92rem;font-weight:600;}
+.tiny-muted{color:#dbe4ff;font-size:.84rem;font-weight:600;}
+.pill{display:inline-block;padding:.34rem .68rem;border-radius:999px;font-size:.84rem;font-weight:900;border:1px solid rgba(255,255,255,.12);margin-right:.4rem;margin-bottom:.32rem;color:#fff;}
+.pill-green{background:#166534;color:#dcfce7;}
+.pill-yellow{background:#92400e;color:#fef3c7;}
+.pill-red{background:#991b1b;color:#fee2e2;}
+.pill-blue{background:#1d4ed8;color:#dbeafe;}
+.pill-orange{background:#9a3412;color:#ffedd5;}
+.setup-line{padding:.55rem .65rem;border-radius:12px;margin:.35rem 0;border:1px solid rgba(255,255,255,.10);font-weight:700;color:#fff;}
+.setup-pass{background:rgba(34,197,94,.18);}
+.setup-near{background:rgba(245,158,11,.20);}
+.setup-far{background:rgba(239,68,68,.18);}
+.bar{height:10px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:.35rem;}
+.fill-green{height:100%;background:linear-gradient(90deg,#16a34a,#4ade80);}
+.fill-yellow{height:100%;background:linear-gradient(90deg,#d97706,#fbbf24);}
+.fill-red{height:100%;background:linear-gradient(90deg,#dc2626,#f87171);}
+.gauge-wrap{padding:.3rem 0 .15rem 0;}
+.gauge-track{height:24px;border-radius:999px;background:linear-gradient(90deg,#7f1d1d 0%, #dc2626 16%, #d97706 34%, #64748b 50%, #d97706 66%, #16a34a 84%, #14532d 100%);position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.14);}
+.gauge-marker{position:absolute;top:-2px;width:11px;height:28px;border-radius:8px;background:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.16),0 2px 12px rgba(255,255,255,.35);}
+.kpi-box{padding:.85rem;border-radius:16px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.04);}
+.state-green{background:linear-gradient(180deg, rgba(15,47,30,.98), rgba(8,20,15,.98));}
+.state-yellow{background:linear-gradient(180deg, rgba(69,45,11,.98), rgba(28,20,7,.98));}
+.state-red{background:linear-gradient(180deg, rgba(69,14,14,.98), rgba(26,9,9,.98));}
+.state-neutral{background:linear-gradient(180deg, rgba(30,41,59,.98), rgba(13,18,30,.98));}
+div[data-testid="stMetric"]{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.12);padding:.75rem .9rem;border-radius:14px;}
+div[data-testid="stMetricLabel"], div[data-testid="stMetricValue"], div[data-testid="stMetricDelta"]{color:#fff !important;}
+[data-testid="stDataFrame"] div[role="grid"]{font-size:15px;}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown("""
 <div class='main-title'>
-  <div style='font-size:1.8rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v9</div>
+  <div style='font-size:1.8rem;font-weight:900;'>📈 Breadth Quant Engine Ultimate v10 High Contrast Holistic Gate</div>
   <div class='small-muted'>Historical gates + range map + oscillator-aware repair matrix + holistic TSI + backtest.</div>
 </div>
 """, unsafe_allow_html=True)
@@ -1179,6 +1185,73 @@ def compute_lead_lag_events(hist: pd.DataFrame, benchmark_price: pd.Series, benc
     return pd.DataFrame(out_rows)
 
 
+
+
+def compute_holistic_gate(state_scores: Dict[str, Any], gauge: Dict[str, Any]) -> Dict[str, Any]:
+    bounce_p = float(state_scores.get("bounce", {}).get("prob") or 0.0)
+    repair_p = float(state_scores.get("repair", {}).get("prob") or 0.0)
+    regime_p = float(state_scores.get("regime", {}).get("prob") or 0.0)
+    fall_p = float(state_scores.get("fall", {}).get("prob") or 0.0)
+    label = gauge.get("label", "Neutral / Mixed")
+    bias = gauge.get("trade_bias", "neutral")
+
+    state = "Neutral"
+    action = "Hold / wait"
+    reasons: List[str] = []
+
+    if bias in {"regime_down", "bear"} and fall_p >= max(bounce_p, repair_p, regime_p):
+        state, action = "Regime Down", "Defensive / short bias"
+        reasons = [f"Fall gate dominant ({fall_p:.0%})", f"Holistic TSI bearish ({label})"]
+    elif bias in {"fall", "weakening", "near_bear"} and fall_p >= 0.22:
+        state, action = "Fall", "Reduce risk / hedge"
+        reasons = [f"Fall gate rising ({fall_p:.0%})", f"Momentum rolling over ({label})"]
+    elif bias in {"regime_up", "bull"} and regime_p >= max(bounce_p, repair_p, fall_p):
+        state, action = "Regime Up", "Full bull bias"
+        reasons = [f"Regime gate strong ({regime_p:.0%})", f"Holistic TSI bullish ({label})"]
+    elif bias == "overheat" and regime_p >= 0.20:
+        state, action = "Overheating", "Trim winners"
+        reasons = [f"Regime still favorable ({regime_p:.0%})", f"Momentum flattening ({label})"]
+    elif bias in {"repair", "early_bull", "near_bull"} and repair_p >= max(fall_p, 0.18):
+        if bias in {"early_bull", "near_bull"}:
+            state, action = "Bounce", "Probe long"
+        else:
+            state, action = "Repair", "Add only on strength"
+        reasons = [f"Repair gate favorable ({repair_p:.0%})", f"Momentum transition in progress ({label})"]
+    elif bounce_p >= max(fall_p, 0.18) and repair_p >= 0.15:
+        state, action = "Bounce", "Probe long"
+        reasons = [f"Bounce/repair gates supportive ({max(bounce_p, repair_p):.0%})", f"Momentum not fully confirmed yet ({label})"]
+    elif fall_p > regime_p and fall_p > repair_p:
+        state, action = "Fall", "Reduce risk / hedge"
+        reasons = [f"Fall gate strongest ({fall_p:.0%})", f"Momentum mixed ({label})"]
+    else:
+        reasons = ["Mixed sweet-spot probabilities", f"Holistic TSI: {label}"]
+
+    conf = max(bounce_p, repair_p, regime_p, fall_p) * 100
+    conf = float(np.clip(0.65 * conf + 0.35 * float(gauge.get("pct", 0.0)), 0, 100))
+    emoji_map = {
+        "Bounce": "🟡", "Repair": "🟡", "Regime Up": "🟢",
+        "Overheating": "🟠", "Fall": "🔴", "Regime Down": "🔴", "Neutral": "⚪"
+    }
+    return {"state": state, "action": action, "confidence": conf, "emoji": emoji_map.get(state, "⚪"), "reasons": reasons}
+
+
+def render_holistic_gate_card(gate: Dict[str, Any], state_scores: Dict[str, Any]):
+    state = gate.get("state", "Neutral")
+    css = "state-green" if state == "Regime Up" else "state-red" if state in {"Fall", "Regime Down"} else "state-yellow" if state in {"Bounce", "Repair", "Overheating"} else "state-neutral"
+    st.markdown(f"<div class='soft-card {css}'>", unsafe_allow_html=True)
+    st.markdown("<div class='score-title'>Holistic Gate</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='score-value-sm'>{gate['emoji']} {gate['state']}</div>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill pill-blue'>Confidence: {gate['confidence']:.0f}%</span>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill pill-yellow'>Trade: {gate['action']}</span>", unsafe_allow_html=True)
+    for k in ["bounce", "repair", "regime", "fall"]:
+        prob = float(state_scores.get(k, {}).get("prob") or 0.0) * 100
+        pill = "pill-red" if k == "fall" else "pill-green" if k in {"repair", "regime"} else "pill-blue"
+        st.markdown(f"<span class='pill {pill}'>{k.title()}: {prob:.1f}%</span>", unsafe_allow_html=True)
+    if gate.get("reasons"):
+        st.markdown(f"<div class='tiny-muted'>{' | '.join(gate['reasons'][:3])}</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def run_holistic_backtest(
     hist: pd.DataFrame,
     daily_feat: pd.DataFrame,
@@ -1187,6 +1260,7 @@ def run_holistic_backtest(
     signal_logic: str = "Cross vs signal",
     require_zero_filter: bool = False,
     min_align: float = 50.0,
+    lookback_years: Optional[int] = 1,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     piv = daily_feat.pivot(index="date", columns="symbol", values="close").sort_index()
     if benchmark_symbol not in piv.columns:
@@ -1195,6 +1269,9 @@ def run_holistic_backtest(
     bench = piv[benchmark_symbol].rename("price").dropna().to_frame()
     bench["ret"] = bench["price"].pct_change()
     bt = hist.join(bench, how="inner").dropna(subset=["holistic_tsi", "holistic_signal", "price"])
+    if lookback_years is not None and not bt.empty:
+        cutoff = bt.index.max() - pd.DateOffset(years=int(lookback_years))
+        bt = bt.loc[bt.index >= cutoff]
     if bt.empty:
         return pd.DataFrame(), {}
 
@@ -1319,7 +1396,9 @@ def render_score_card(title: str, value: float, pct: Optional[float] = None):
 def render_signal_box(signal: str, text: str):
     klass = "pill-green" if signal == "LONG" else "pill-red" if signal == "SHORT" else "pill-yellow"
     st.markdown("<div class='soft-card'>", unsafe_allow_html=True)
-    st.markdown(f"<div class='score-title'>Daily Verdict</div><div class='score-value'>{signal}</div><span class='pill {klass}'>{text}</span>", unsafe_allow_html=True)
+    st.markdown(f"<div class='score-title'>Daily Verdict</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='score-value-sm'>{signal}</div>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill {klass}'>{text}</span>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1338,7 +1417,7 @@ def gauge_color_class(label: str) -> str:
 def render_holistic_gauge(gauge: Dict[str, Any], row: pd.Series):
     pct = float(np.clip(gauge["pct"], 0, 100))
     left_pos = max(1, min(98, pct))
-    css = gauge_color_class(gauge["label"])
+    css = gauge_color_class(gauge["label"]) or "state-neutral"
     st.markdown(f"<div class='soft-card {css}'>", unsafe_allow_html=True)
     st.markdown("<div class='score-title'>Holistic TSI Gauge</div>", unsafe_allow_html=True)
     st.markdown(f"<div class='score-value-sm'>{gauge['emoji']} {gauge['label']} — {pct:.0f}%</div>", unsafe_allow_html=True)
@@ -1346,12 +1425,13 @@ def render_holistic_gauge(gauge: Dict[str, Any], row: pd.Series):
     st.markdown(f"<span class='pill pill-yellow'>TSI: {fmt_num(row.get('holistic_tsi', np.nan),2)}</span>", unsafe_allow_html=True)
     st.markdown(f"<span class='pill pill-blue'>Signal: {fmt_num(row.get('holistic_signal', np.nan),2)}</span>", unsafe_allow_html=True)
     st.markdown(f"<span class='pill pill-green'>Above signal: {fmt_num(row.get('pct_above_signal', np.nan),1)}%</span>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill pill-orange'>Slope(3): {fmt_num(row.get('slope3', np.nan),2)}</span>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='gauge-wrap'><div class='gauge-track'><div class='gauge-marker' style='left: calc({left_pos}% - 5px);'></div></div></div>",
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<div class='tiny-muted'>Below zero bullish cross = Bounce / Repair. Above zero bullish state = Regime Up. Bearish mirrors apply on the downside.</div>",
+        f"<div class='tiny-muted'>Below zero bullish cross = Bounce / Repair. Above zero bullish state = Regime Up. Positive but rolling = Overheating. Bearish mirrors apply on the downside.</div>",
         unsafe_allow_html=True,
     )
     st.markdown("</div>", unsafe_allow_html=True)
@@ -1393,6 +1473,8 @@ def main():
         bt_logic = st.selectbox("Signal Logic", ["Cross vs signal", "Cross zero", "Either"], index=0)
         bt_zero_filter = st.toggle("Require zero filter", value=False)
         bt_min_align = st.slider("Min component alignment %", 0, 100, 50, 5)
+        bt_lookback_label = st.selectbox("Backtest Lookback", ["1Y", "2Y", "3Y", "5Y", "10Y", "20Y", "MAX", "Custom"], index=0)
+        bt_custom_years = st.number_input("Custom backtest years", min_value=1, max_value=30, value=7, step=1, disabled=(bt_lookback_label != "Custom"))
 
         if reset:
             for p in [HIST_DAILY_PATH, HIST_WEEKLY_PATH, MODEL_PATH]:
@@ -1400,6 +1482,13 @@ def main():
                     p.unlink()
             st.success("Model reset")
             st.rerun()
+
+    if bt_lookback_label == "MAX":
+        bt_lookback_years = None
+    elif bt_lookback_label == "Custom":
+        bt_lookback_years = int(bt_custom_years)
+    else:
+        bt_lookback_years = int(bt_lookback_label.replace("Y", ""))
 
     model = None
     if hist_upload is not None and (force_rebuild or not MODEL_PATH.exists()):
@@ -1455,6 +1544,7 @@ def main():
     holistic_hist, holistic_components = compute_holistic_tsi_history(daily_feat, tsi_long, tsi_short, tsi_signal)
     holistic_row = holistic_hist.loc[holistic_hist.index.max()] if not holistic_hist.empty else pd.Series(dtype=float)
     gauge = holistic_gauge_state(holistic_row)
+    holistic_gate = compute_holistic_gate(state_scores, gauge)
 
     bt_df, bt_stats = (pd.DataFrame(), {})
     if run_backtest and not holistic_hist.empty:
@@ -1466,6 +1556,7 @@ def main():
             signal_logic=bt_logic,
             require_zero_filter=bt_zero_filter,
             min_align=bt_min_align,
+            lookback_years=bt_lookback_years,
         )
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1478,7 +1569,11 @@ def main():
     with c4:
         render_score_card("Fall", 100 * state_scores["fall"]["prob"] if pd.notna(state_scores["fall"]["prob"]) else 0, 100 * state_scores["fall"]["prob"] if pd.notna(state_scores["fall"]["prob"]) else np.nan)
 
-    render_signal_box(signal["signal"], " | ".join(signal["reasons"][:4]))
+    gate_left, gate_right = st.columns([1.15, .85])
+    with gate_left:
+        render_holistic_gate_card(holistic_gate, state_scores)
+    with gate_right:
+        render_signal_box(signal["signal"], " | ".join(signal["reasons"][:3]))
 
     tabs = st.tabs(["Decision Dashboard", "Range Map / State Ladder", "Backtest vs Buy & Hold", "Diagnostics", "Holistic TSI"])
     tab1, tab2, tab3, tab4, tab5 = tabs
@@ -1486,6 +1581,7 @@ def main():
     with tab1:
         left, right = st.columns([1.1, 1.2])
         with left:
+            render_holistic_gate_card(holistic_gate, state_scores)
             st.markdown("<div class='soft-card'><div class='score-title'>Intraday / Repair Context</div>", unsafe_allow_html=True)
             proxy = proxy_nymo(snapshot, prev_snapshot)
             st.write(f"NYMO Proxy: {fmt_num(proxy['value'])} | Delta: {fmt_num(proxy['delta'])} | State: {proxy['state']}")
@@ -1517,7 +1613,8 @@ def main():
         st.markdown(
             f"<span class='pill pill-blue'>TSI params: {tsi_long},{tsi_short},{tsi_signal}</span>"
             f"<span class='pill pill-green'>Benchmark: {benchmark_symbol}</span>"
-            f"<span class='pill pill-yellow'>Mode: {bt_mode}</span>",
+            f"<span class='pill pill-yellow'>Mode: {bt_mode}</span>"
+            f"<span class='pill pill-orange'>Lookback: {bt_lookback_label if bt_lookback_label != 'Custom' else str(bt_custom_years)+'Y'}</span>",
             unsafe_allow_html=True,
         )
         if not run_backtest:
