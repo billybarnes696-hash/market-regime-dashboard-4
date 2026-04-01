@@ -80,6 +80,9 @@ st.markdown(
 APP_DIR = Path("holistic_oscillator_lab_store")
 APP_DIR.mkdir(exist_ok=True)
 MODEL_PATH = APP_DIR / "best_model.json"
+PARTIAL_RESULTS_PATH = APP_DIR / "partial_results.csv"
+BEST_PREVIEW_PATH = APP_DIR / "best_preview.parquet"
+BEST_EQUITY_PATH = APP_DIR / "best_equity.parquet"
 
 SYMBOL_MAP = {
     "rsp": "RSP", "ursp": "URSP", "spy": "SPY", "vxx": "VXX",
@@ -569,6 +572,8 @@ class SearchConfig:
     top_n: int = 20
     use_component_weights: bool = True
     max_models: int = 500
+    save_every: int = 20
+
 
 def run_search(hist: pd.DataFrame, config: SearchConfig) -> Tuple[pd.DataFrame, Dict[str, Any], pd.DataFrame]:
     piv_close = hist.pivot(index="date", columns="symbol", values="close").sort_index()
@@ -588,13 +593,31 @@ def run_search(hist: pd.DataFrame, config: SearchConfig) -> Tuple[pd.DataFrame, 
 
     total_models = len(grids) * len(bw_grid) * len(config.trigger_rules) * len(config.exit_rules)
     if total_models > config.max_models:
-        # thin weight grid to keep runtime manageable
         step = int(math.ceil(total_models / config.max_models))
         bw_grid = bw_grid[::step]
         total_models = len(grids) * len(bw_grid) * len(config.trigger_rules) * len(config.exit_rules)
 
     progress = st.progress(0.0, text="Searching oscillator sweet spots...")
+    status = st.empty()
+    live_table = st.empty()
     done = 0
+
+    def flush_partial():
+        if results:
+            partial = pd.DataFrame(results).sort_values(["score", "sharpe", "alpha_return"], ascending=False).reset_index(drop=True)
+            partial.to_csv(PARTIAL_RESULTS_PATH, index=False)
+            live_table.dataframe(partial.head(config.top_n), width="stretch", hide_index=True)
+        if best_payload:
+            try:
+                pd.DataFrame(best_payload["holistic_hist"]).to_parquet(BEST_PREVIEW_PATH, index=False)
+                eq_df = pd.DataFrame({
+                    "date": best_payload["equity"].index,
+                    "strategy": best_payload["equity"].values,
+                    "buyhold": best_payload["benchmark_equity"].values,
+                })
+                eq_df.to_parquet(BEST_EQUITY_PATH, index=False)
+            except Exception:
+                pass
 
     for fam, params in grids:
         osc_df = build_symbol_oscillators(hist, fam, json.dumps(params, sort_keys=True))
@@ -604,11 +627,13 @@ def run_search(hist: pd.DataFrame, config: SearchConfig) -> Tuple[pd.DataFrame, 
             )
             if holistic_hist.empty:
                 done += len(config.trigger_rules) * len(config.exit_rules)
+                progress.progress(min(done / max(total_models, 1), 1.0), text=f"Searching oscillator sweet spots... {done}/{total_models}")
                 continue
 
             comp = holistic_hist.set_index("date").reindex(benchmark_price.index).dropna(subset=["holistic_osc", "holistic_signal"])
             if comp.empty:
                 done += len(config.trigger_rules) * len(config.exit_rules)
+                progress.progress(min(done / max(total_models, 1), 1.0), text=f"Searching oscillator sweet spots... {done}/{total_models}")
                 continue
 
             price = benchmark_price.reindex(comp.index).dropna()
@@ -618,47 +643,51 @@ def run_search(hist: pd.DataFrame, config: SearchConfig) -> Tuple[pd.DataFrame, 
                 for ex in config.exit_rules:
                     pos = compute_positions(comp["holistic_osc"], comp["holistic_signal"], trig, ex)
                     stats = backtest_long_cash(price, pos)
-                    if not stats:
-                        done += 1
-                        continue
-
-                    model_score = score_model(stats)
-                    row = {
-                        "score": model_score,
-                        "family": fam,
-                        "params": json.dumps(params),
-                        "bucket_weights": json.dumps(weights),
-                        "trigger": trig,
-                        "exit": ex,
-                        "return": stats["strategy_return"],
-                        "benchmark_return": stats["benchmark_return"],
-                        "alpha_return": stats["strategy_return"] - stats["benchmark_return"],
-                        "cagr": stats["strategy_cagr"],
-                        "benchmark_cagr": stats["benchmark_cagr"],
-                        "max_dd": stats["max_dd"],
-                        "sharpe": stats["sharpe"],
-                        "trades": stats["trades"],
-                        "win_rate": stats["win_rate"],
-                        "avg_trade": stats["avg_trade"],
-                        "avg_lead_bars": stats["avg_lead_bars"],
-                    }
-                    results.append(row)
-
-                    if not best_payload or model_score > best_payload.get("score", -999):
-                        best_payload = {
-                            **row,
-                            "holistic_hist": comp.reset_index(),
-                            "equity": stats["equity"],
-                            "benchmark_equity": stats["benchmark_equity"],
-                            "bucket_hist": bucket_hist,
+                    if stats:
+                        model_score = score_model(stats)
+                        row = {
+                            "score": model_score,
+                            "family": fam,
+                            "params": json.dumps(params),
+                            "bucket_weights": json.dumps(weights),
+                            "trigger": trig,
+                            "exit": ex,
+                            "return": stats["strategy_return"],
+                            "benchmark_return": stats["benchmark_return"],
+                            "alpha_return": stats["strategy_return"] - stats["benchmark_return"],
+                            "cagr": stats["strategy_cagr"],
+                            "benchmark_cagr": stats["benchmark_cagr"],
+                            "max_dd": stats["max_dd"],
+                            "sharpe": stats["sharpe"],
+                            "trades": stats["trades"],
+                            "win_rate": stats["win_rate"],
+                            "avg_trade": stats["avg_trade"],
+                            "avg_lead_bars": stats["avg_lead_bars"],
                         }
-                        preview_plot = comp.reset_index().copy()
+                        results.append(row)
+
+                        if not best_payload or model_score > best_payload.get("score", -999):
+                            best_payload = {
+                                **row,
+                                "holistic_hist": comp.reset_index(),
+                                "equity": stats["equity"],
+                                "benchmark_equity": stats["benchmark_equity"],
+                                "bucket_hist": bucket_hist,
+                            }
+                            preview_plot = comp.reset_index().copy()
+
                     done += 1
                     progress.progress(min(done / max(total_models, 1), 1.0), text=f"Searching oscillator sweet spots... {done}/{total_models}")
+                    if done % max(config.save_every, 1) == 0:
+                        status.info(f"Checkpoint saved at {done}/{total_models}.")
+                        flush_partial()
 
+    flush_partial()
     progress.empty()
-    res_df = pd.DataFrame(results).sort_values(["score", "sharpe", "alpha_return"], ascending=False).reset_index(drop=True)
+    status.success(f"Search complete. Evaluated {done} model tests.")
+    res_df = pd.DataFrame(results).sort_values(["score", "sharpe", "alpha_return"], ascending=False).reset_index(drop=True) if results else pd.DataFrame()
     return res_df.head(config.top_n), best_payload, preview_plot
+
 
 # ---------------------------------------------------------
 # Charts
@@ -707,13 +736,16 @@ def main() -> None:
         trig_rules = st.multiselect("Entry trigger rules", TRIGGER_CHOICES, default=["signal_cross", "bull_cross_below_zero", "zero_cross"])
         exit_rules = st.multiselect("Exit rules", EXIT_CHOICES, default=["signal_cross_down", "zero_cross_down"])
         top_n = st.slider("Top results to keep", 5, 50, 15, 1)
-        max_models = st.slider("Search budget (max model tests)", 100, 3000, 800, 100)
+        max_models = st.slider("Search budget (max model tests)", 100, 3000, 200, 100)
+        save_every = st.slider("Checkpoint every N tests", 5, 100, 20, 5)
         use_component_weights = st.toggle("Use custom component weights", value=True)
-        run_btn = st.button("Run oscillator sweet-spot search", type="primary", use_container_width=True)
+        run_btn = st.button("Run oscillator sweet-spot search", type="primary", width="stretch")
 
         best_saved = load_json(MODEL_PATH, {})
         if best_saved:
             st.caption("Saved best model is available from prior run.")
+        if PARTIAL_RESULTS_PATH.exists():
+            st.caption("Partial results from a prior run are available below.")
 
     if not zip_file:
         st.info("Upload your StockCharts ZIP to start the oscillator search.")
@@ -759,6 +791,7 @@ def main() -> None:
                     top_n=top_n,
                     use_component_weights=use_component_weights,
                     max_models=max_models,
+                    save_every=save_every,
                 )
                 res_df, best_payload, preview_plot = run_search(daily_df, cfg)
                 if res_df.empty:
@@ -781,19 +814,32 @@ def main() -> None:
                             max_dd_pct=lambda x: (x["max_dd"] * 100).round(2),
                             win_rate_pct=lambda x: (x["win_rate"] * 100).round(1),
                         ),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
             except Exception as e:
                 st.exception(e)
         elif "lab_results" in st.session_state:
-            st.dataframe(st.session_state["lab_results"], use_container_width=True, hide_index=True)
+            st.dataframe(st.session_state["lab_results"], width="stretch", hide_index=True)
+        elif PARTIAL_RESULTS_PATH.exists():
+            st.warning("Showing partial results from the last checkpointed run.")
+            st.dataframe(pd.read_csv(PARTIAL_RESULTS_PATH).head(top_n), width="stretch", hide_index=True)
         else:
             st.info("Click **Run oscillator sweet-spot search** to rank the best models.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab2:
         payload = st.session_state.get("best_payload", {})
+        if not payload and BEST_PREVIEW_PATH.exists() and BEST_EQUITY_PATH.exists() and MODEL_PATH.exists():
+            payload = load_json(MODEL_PATH, {})
+            try:
+                payload["holistic_hist"] = pd.read_parquet(BEST_PREVIEW_PATH)
+                eq_df = pd.read_parquet(BEST_EQUITY_PATH)
+                payload["equity"] = pd.Series(eq_df["strategy"].values, index=pd.to_datetime(eq_df["date"]))
+                payload["benchmark_equity"] = pd.Series(eq_df["buyhold"].values, index=pd.to_datetime(eq_df["date"]))
+                payload["bucket_hist"] = pd.DataFrame()
+            except Exception:
+                payload = {}
         if not payload:
             st.info("Run the search first. Then the best model will appear here.")
         else:
@@ -828,18 +874,18 @@ def main() -> None:
             with c1:
                 st.plotly_chart(
                     plot_oscillator(hist, f"Best holistic oscillator vs signal — {payload['family']}", "holistic_osc", "holistic_signal"),
-                    use_container_width=True,
+                    width="stretch",
                 )
             with c2:
                 st.plotly_chart(
                     plot_equity(eq, bh, f"{benchmark} strategy vs buy-and-hold"),
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             with st.expander("Bucket contribution detail", expanded=False):
                 bucket_hist = payload["bucket_hist"]
                 if isinstance(bucket_hist, pd.DataFrame) and not bucket_hist.empty:
-                    st.dataframe(bucket_hist.sort_values(["date", "bucket"]).tail(60), use_container_width=True, hide_index=True)
+                    st.dataframe(bucket_hist.sort_values(["date", "bucket"]).tail(60), width="stretch", hide_index=True)
                 else:
                     st.info("No bucket detail available.")
 
@@ -849,7 +895,7 @@ def main() -> None:
         st.markdown("Use this to confirm the ZIP parsed the expected symbols.")
         piv = daily_df.pivot(index="date", columns="symbol", values="close").sort_index()
         latest = piv.tail(5).reset_index()
-        st.dataframe(latest, use_container_width=True)
+        st.dataframe(latest, width="stretch")
         st.markdown("</div>", unsafe_allow_html=True)
 
 
