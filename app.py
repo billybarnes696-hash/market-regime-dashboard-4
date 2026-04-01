@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Holistic Oscillator Lab v1
-- Research-first Streamlit app
-- Searches for oscillator sweet spots across holistic breadth/leadership/risk buckets
-- Ranks models versus SPY / RSP buy-and-hold
+Holistic Oscillator Lab v2
+Phase 2:
+- combo-aware
+- percentile-aware
+- regime-aware
+- compares directly against RSP TSI baseline
+- includes hybrid oscillator with price-confirmation bucket
 """
 
 from __future__ import annotations
 
 import io
-import itertools
 import json
 import math
 import zipfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 
@@ -28,7 +30,7 @@ import streamlit as st
 # App config / style
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Holistic Oscillator Lab v1",
+    page_title="Holistic Oscillator Lab v2",
     layout="wide",
     page_icon="📈",
 )
@@ -40,7 +42,7 @@ CUSTOM_CSS = """
   --text:#f5f7fb;--muted:#a8b4cf;
   --green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--blue:#60a5fa;
 }
-.block-container{max-width:1550px;padding-top:1rem;padding-bottom:2rem;}
+.block-container{max-width:1580px;padding-top:1rem;padding-bottom:2rem;}
 .main-title{
   padding:1rem 1.2rem;border-radius:18px;
   background:linear-gradient(135deg, rgba(96,165,250,.18), rgba(34,197,94,.10));
@@ -70,19 +72,15 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown(
     """
     <div class='main-title'>
-      <div style='font-size:1.8rem;font-weight:950;'>📈 Holistic Oscillator Lab v1</div>
-      <div class='muted'>Search oscillator sweet spots across breadth, leadership, and risk buckets. Rank models by backtest results versus buy-and-hold.</div>
+      <div style='font-size:1.8rem;font-weight:950;'>📈 Holistic Oscillator Lab v2</div>
+      <div class='muted'>Phase 2 research lab: hybrid oscillator, bell-curve percentile map, forward-return sweet spots, and direct comparison versus RSP TSI.</div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-APP_DIR = Path("holistic_oscillator_lab_store")
+APP_DIR = Path("holistic_oscillator_lab_v2_store")
 APP_DIR.mkdir(exist_ok=True)
-MODEL_PATH = APP_DIR / "best_model.json"
-PARTIAL_RESULTS_PATH = APP_DIR / "partial_results.csv"
-BEST_PREVIEW_PATH = APP_DIR / "best_preview.parquet"
-BEST_EQUITY_PATH = APP_DIR / "best_equity.parquet"
 
 SYMBOL_MAP = {
     "rsp": "RSP", "ursp": "URSP", "spy": "SPY", "vxx": "VXX",
@@ -97,26 +95,52 @@ SYMBOL_MAP = {
     "iwm_spy": "IWM:SPY", "xlf_spy": "XLF:SPY", "spxs_svol": "SPXS:SVOL",
 }
 
-BUCKETS = {
-    "breadth": ["$BPSPX", "$BPNYA", "$SPXA50R", "$OEXA50R", "$OEXA150R", "$OEXA200R", "$NYMO", "$NYSI", "$NYHL", "$NYAD", "$SPXADP"],
-    "leadership": ["RSP", "SPY", "RSP:SPY", "SMH:SPY", "IWM:SPY", "XLF:SPY", "HYG:IEF", "HYG:TLT"],
-    "risk": ["$VIX", "VXX", "$TRIN", "$CPCE", "SPXS:SVOL"],
-}
 INVERSE = {"$VIX", "VXX", "$TRIN", "$CPCE", "SPXS:SVOL"}
 
-DEFAULT_COMPONENT_WEIGHTS = {
-    "$BPSPX": 1.25, "$BPNYA": 1.00, "$SPXA50R": 1.25, "$OEXA50R": 0.75, "$OEXA150R": 0.70, "$OEXA200R": 0.75,
-    "$NYMO": 1.15, "$NYSI": 1.00, "$NYHL": 0.85, "$NYAD": 0.90, "$SPXADP": 0.90,
-    "RSP": 0.85, "SPY": 0.60, "RSP:SPY": 1.00, "SMH:SPY": 0.90, "IWM:SPY": 0.75, "XLF:SPY": 0.70, "HYG:IEF": 0.95, "HYG:TLT": 0.70,
-    "$VIX": 1.00, "VXX": 0.90, "$TRIN": 0.80, "$CPCE": 0.75, "SPXS:SVOL": 1.00,
+BUCKETS = {
+    "breadth": ["$BPSPX", "$BPNYA", "$SPXA50R", "$OEXA50R", "$OEXA150R", "$OEXA200R", "$NYMO", "$NYSI", "$NYHL", "$NYAD", "$SPXADP"],
+    "leadership": ["RSP:SPY", "SMH:SPY", "IWM:SPY", "XLF:SPY", "HYG:IEF", "HYG:TLT"],
+    "risk": ["$VIX", "VXX", "$TRIN", "$CPCE", "SPXS:SVOL"],
+    "price": ["RSP", "SPY"],
 }
 
-OSCILLATOR_CHOICES = ["TSI", "RSI", "CCI", "ROC", "BB%"]
-TRIGGER_CHOICES = ["signal_cross", "bull_cross_below_zero", "zero_cross"]
-EXIT_CHOICES = ["signal_cross_down", "zero_cross_down", "bear_cross_above_zero"]
+DEFAULT_COMPONENT_WEIGHTS = {
+    "$BPSPX": 1.25, "$BPNYA": 1.00, "$SPXA50R": 1.25, "$OEXA50R": 0.80, "$OEXA150R": 0.70, "$OEXA200R": 0.75,
+    "$NYMO": 1.20, "$NYSI": 1.05, "$NYHL": 0.90, "$NYAD": 0.90, "$SPXADP": 0.90,
+    "RSP:SPY": 1.00, "SMH:SPY": 0.90, "IWM:SPY": 0.75, "XLF:SPY": 0.70, "HYG:IEF": 0.95, "HYG:TLT": 0.70,
+    "$VIX": 1.00, "VXX": 0.90, "$TRIN": 0.80, "$CPCE": 0.75, "SPXS:SVOL": 1.00,
+    "RSP": 1.15, "SPY": 0.65,
+}
+
+MODEL_LIBRARY = {
+    "RSP_TSI_BASELINE": {
+        "bucket_weights": {"price": 1.0},
+        "combo": "TSI",
+    },
+    "HOLISTIC_TSI": {
+        "bucket_weights": {"breadth": 0.60, "leadership": 0.20, "risk": 0.20},
+        "combo": "TSI",
+    },
+    "HYBRID_TSI_PRICE": {
+        "bucket_weights": {"breadth": 0.45, "leadership": 0.15, "risk": 0.15, "price": 0.25},
+        "combo": "TSI",
+    },
+    "HOLISTIC_TSI_BB": {
+        "bucket_weights": {"breadth": 0.50, "leadership": 0.15, "risk": 0.15, "price": 0.20},
+        "combo": "TSI+BB",
+    },
+    "HOLISTIC_TSI_ROC": {
+        "bucket_weights": {"breadth": 0.50, "leadership": 0.20, "risk": 0.10, "price": 0.20},
+        "combo": "TSI+ROC",
+    },
+    "HOLISTIC_TSI_CCI": {
+        "bucket_weights": {"breadth": 0.50, "leadership": 0.20, "risk": 0.10, "price": 0.20},
+        "combo": "TSI+CCI",
+    },
+}
 
 # ---------------------------------------------------------
-# Utilities
+# Helpers
 # ---------------------------------------------------------
 def safe_float(x: Any) -> float:
     try:
@@ -124,24 +148,20 @@ def safe_float(x: Any) -> float:
     except Exception:
         return np.nan
 
+def robust_z(series: pd.Series, window: int = 126) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce")
+    mean = s.rolling(window, min_periods=max(20, window // 3)).mean()
+    std = s.rolling(window, min_periods=max(20, window // 3)).std().replace(0, np.nan)
+    z = (s - mean) / std
+    return z.clip(-4, 4)
+
 def fmt_num(v: Any, d: int = 2) -> str:
     if pd.isna(v):
         return "n/a"
     return f"{float(v):.{d}f}"
 
-def save_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, indent=2, default=str))
-
-def load_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return default
-
 # ---------------------------------------------------------
-# Parsing uploads
+# Parsing
 # ---------------------------------------------------------
 def parse_stockcharts_csv(content: bytes) -> pd.DataFrame:
     text = content.decode("utf-8", errors="ignore")
@@ -158,14 +178,7 @@ def parse_stockcharts_csv(content: bytes) -> pd.DataFrame:
             continue
         vals = [safe_float(x) for x in parts[1:6]]
         rows.append(
-            {
-                "date": dt,
-                "open": vals[0],
-                "high": vals[1],
-                "low": vals[2],
-                "close": vals[3],
-                "volume": vals[4],
-            }
+            {"date": dt, "open": vals[0], "high": vals[1], "low": vals[2], "close": vals[3], "volume": vals[4]}
         )
     if not rows:
         raise ValueError("Could not parse rows from CSV.")
@@ -186,9 +199,9 @@ def symbol_from_filename(name: str) -> Tuple[str, str]:
 def parse_stockcharts_zip(file_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
     daily, weekly = [], []
     with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-        for name in zf.namelist():
-            if name.endswith("/") or not name.lower().endswith(".csv"):
-                continue
+        names = [n for n in zf.namelist() if (not n.endswith("/")) and n.lower().endswith(".csv")]
+        prog = st.progress(0.0, text="Parsing ZIP...")
+        for i, name in enumerate(names, start=1):
             try:
                 content = zf.read(name)
                 df = parse_stockcharts_csv(content)
@@ -196,7 +209,10 @@ def parse_stockcharts_zip(file_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame
                 df["symbol"] = sym
                 (weekly if tf == "weekly" else daily).append(df)
             except Exception:
-                continue
+                pass
+            prog.progress(i / max(len(names), 1), text=f"Parsing ZIP... {i}/{len(names)}")
+        prog.empty()
+
     if not daily:
         raise ValueError("No daily CSV files were parsed from ZIP.")
     daily_df = pd.concat(daily, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
@@ -230,220 +246,209 @@ def true_strength_index(series: pd.Series, long_len: int = 25, short_len: int = 
     return tsi, signal
 
 def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
-    high = pd.to_numeric(high, errors="coerce")
-    low = pd.to_numeric(low, errors="coerce")
-    close = pd.to_numeric(close, errors="coerce")
-    tp = (high + low + close) / 3
+    h = pd.to_numeric(high, errors="coerce")
+    l = pd.to_numeric(low, errors="coerce")
+    c = pd.to_numeric(close, errors="coerce")
+    tp = (h + l + c) / 3
     sma = tp.rolling(period).mean()
     mad = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
     return (tp - sma) / (0.015 * mad.replace(0, np.nan))
 
 def percent_b(series: pd.Series, window: int = 20, num_std: float = 2.0) -> pd.Series:
-    series = pd.to_numeric(series, errors="coerce")
-    ma = series.rolling(window).mean()
-    std = series.rolling(window).std()
+    s = pd.to_numeric(series, errors="coerce")
+    ma = s.rolling(window).mean()
+    std = s.rolling(window).std()
     upper = ma + num_std * std
     lower = ma - num_std * std
     denom = (upper - lower).replace(0, np.nan)
-    return (series - lower) / denom
+    return (s - lower) / denom
 
 def roc(series: pd.Series, length: int = 10) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
     return 100 * (s / s.shift(length) - 1)
 
-def mfi(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, period: int = 14) -> pd.Series:
-    tp = (pd.to_numeric(high, errors="coerce") + pd.to_numeric(low, errors="coerce") + pd.to_numeric(close, errors="coerce")) / 3
-    mf = tp * pd.to_numeric(volume, errors="coerce")
-    pos = pd.Series(np.where(tp > tp.shift(1), mf, 0.0), index=tp.index)
-    neg = pd.Series(np.where(tp < tp.shift(1), mf, 0.0), index=tp.index)
-    pos_sum = pos.rolling(period).sum()
-    neg_sum = neg.rolling(period).sum()
-    ratio = pos_sum / neg_sum.replace(0, np.nan)
-    return 100 - (100 / (1 + ratio))
-
-def cmf(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, period: int = 20) -> pd.Series:
-    h = pd.to_numeric(high, errors="coerce")
-    l = pd.to_numeric(low, errors="coerce")
-    c = pd.to_numeric(close, errors="coerce")
-    v = pd.to_numeric(volume, errors="coerce")
-    denom = (h - l).replace(0, np.nan)
-    mfm = ((c - l) - (h - c)) / denom
-    mfv = mfm * v
-    return mfv.rolling(period).sum() / v.rolling(period).sum().replace(0, np.nan)
-
 # ---------------------------------------------------------
-# Build normalized oscillator series by symbol
+# Oscillator transforms
 # ---------------------------------------------------------
-def robust_z(series: pd.Series, window: int = 126) -> pd.Series:
-    s = pd.to_numeric(series, errors="coerce")
-    mean = s.rolling(window, min_periods=max(20, window // 3)).mean()
-    std = s.rolling(window, min_periods=max(20, window // 3)).std().replace(0, np.nan)
-    z = (s - mean) / std
-    return z.clip(-4, 4)
-
-def oscillator_by_family(g: pd.DataFrame, family: str, params: Dict[str, Any]) -> Tuple[pd.Series, pd.Series]:
+def calc_family(g: pd.DataFrame, family: str, params: Dict[str, Any]) -> Tuple[pd.Series, pd.Series]:
     c = g["close"]
-    h = g.get("high", c)
-    l = g.get("low", c)
-    v = g.get("volume", pd.Series(index=g.index, dtype=float))
+    h = g["high"] if "high" in g.columns else c
+    l = g["low"] if "low" in g.columns else c
     family = family.upper()
-
     if family == "TSI":
-        tsi, signal = true_strength_index(c, int(params["long"]), int(params["short"]), int(params["signal"]))
-        return tsi, signal
-    if family == "RSI":
-        base = rsi(c, int(params["length"]))
-        signal = ema(base, int(params.get("signal", 5)))
-        return base, signal
-    if family == "CCI":
-        base = cci(h, l, c, int(params["length"]))
-        signal = ema(base, int(params.get("signal", 5)))
-        return base, signal
+        return true_strength_index(c, params["long"], params["short"], params["signal"])
+    if family == "BB":
+        base = (percent_b(c, params["length"], params["std"]) - 0.5) * 100
+        return base, ema(base, params["signal"])
     if family == "ROC":
-        base = roc(c, int(params["length"]))
-        signal = ema(base, int(params.get("signal", 5)))
-        return base, signal
-    if family == "BB%":
-        base = percent_b(c, int(params["length"]), float(params.get("std", 2.0)))
-        base = (base - 0.5) * 100
-        signal = ema(base, int(params.get("signal", 5)))
-        return base, signal
-    if family == "MFI":
-        base = mfi(h, l, c, v, int(params["length"]))
-        signal = ema(base, int(params.get("signal", 5)))
-        return base, signal
-    if family == "CMF":
-        base = cmf(h, l, c, v, int(params["length"]))
-        signal = ema(base, int(params.get("signal", 5)))
-        return base, signal
+        base = roc(c, params["length"])
+        return base, ema(base, params["signal"])
+    if family == "CCI":
+        base = cci(h, l, c, params["length"])
+        return base, ema(base, params["signal"])
     raise ValueError(f"Unsupported family: {family}")
 
-@st.cache_data(show_spinner=False)
-def build_symbol_oscillators(hist: pd.DataFrame, family: str, params_json: str) -> pd.DataFrame:
-    params = json.loads(params_json)
+def build_symbol_family(hist: pd.DataFrame, family: str, params: Dict[str, Any]) -> pd.DataFrame:
     out = []
     for sym, g in hist.groupby("symbol", sort=False):
         g = g.sort_values("date").copy()
-        osc, sig = oscillator_by_family(g, family, params)
-        osc = robust_z(osc, 126)
+        val, sig = calc_family(g, family, params)
+        val = robust_z(val, 126)
         sig = robust_z(sig, 126)
         if sym in INVERSE:
-            osc = -osc
+            val = -val
             sig = -sig
-        out.append(
-            pd.DataFrame(
-                {
-                    "date": g["date"].values,
-                    "symbol": sym,
-                    "osc": osc.values,
-                    "signal": sig.values,
-                }
-            )
-        )
+        out.append(pd.DataFrame({"date": g["date"].values, "symbol": sym, "val": val.values, "sig": sig.values}))
     return pd.concat(out, ignore_index=True)
 
-# ---------------------------------------------------------
-# Composite builder
-# ---------------------------------------------------------
 def available_bucket_members(symbols: List[str], bucket_name: str) -> List[str]:
     return [s for s in BUCKETS[bucket_name] if s in symbols]
 
-def weighted_bucket_series(osc_df: pd.DataFrame, bucket_name: str, members: List[str], use_component_weights: bool = True) -> pd.DataFrame:
+def weighted_bucket_series(family_df: pd.DataFrame, bucket_name: str, members: List[str]) -> pd.DataFrame:
     if not members:
-        return pd.DataFrame(columns=["date", "bucket", "bucket_osc", "bucket_signal"])
-    sub = osc_df[osc_df["symbol"].isin(members)].copy()
+        return pd.DataFrame(columns=["date", "bucket", "bucket_val", "bucket_sig"])
+    sub = family_df[family_df["symbol"].isin(members)].copy()
     if sub.empty:
-        return pd.DataFrame(columns=["date", "bucket", "bucket_osc", "bucket_signal"])
-    sub["wt"] = sub["symbol"].map(DEFAULT_COMPONENT_WEIGHTS).fillna(1.0 if not use_component_weights else 1.0)
+        return pd.DataFrame(columns=["date", "bucket", "bucket_val", "bucket_sig"])
+    sub["wt"] = sub["symbol"].map(DEFAULT_COMPONENT_WEIGHTS).fillna(1.0)
     agg = (
         sub.groupby("date")
-        .apply(
-            lambda x: pd.Series(
-                {
-                    "bucket_osc": np.average(x["osc"], weights=x["wt"]),
-                    "bucket_signal": np.average(x["signal"], weights=x["wt"]),
-                    "members": int(x["symbol"].nunique()),
-                }
-            )
-        )
+        .apply(lambda x: pd.Series({
+            "bucket_val": np.average(x["val"], weights=x["wt"]),
+            "bucket_sig": np.average(x["sig"], weights=x["wt"]),
+        }))
         .reset_index()
     )
     agg["bucket"] = bucket_name
     return agg
 
-def build_holistic_composite(
-    osc_df: pd.DataFrame,
+def build_combo_hist(
+    hist: pd.DataFrame,
     bucket_weights: Dict[str, float],
-    use_component_weights: bool = True,
+    combo_name: str,
+    params_map: Dict[str, Dict[str, Any]],
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    symbols = osc_df["symbol"].dropna().unique().tolist()
-    bucket_frames = []
-    for bucket in BUCKETS:
-        members = available_bucket_members(symbols, bucket)
-        bf = weighted_bucket_series(osc_df, bucket, members, use_component_weights=use_component_weights)
-        bucket_frames.append(bf)
-    bucket_hist = pd.concat(bucket_frames, ignore_index=True) if bucket_frames else pd.DataFrame()
+    symbols = sorted(hist["symbol"].dropna().unique().tolist())
+    families = combo_name.split("+")
+    combo_parts = []
 
-    if bucket_hist.empty:
+    for fam in families:
+        fam_df = build_symbol_family(hist, fam, params_map[fam])
+        bucket_frames = []
+        for bucket in BUCKETS:
+            members = available_bucket_members(symbols, bucket)
+            bf = weighted_bucket_series(fam_df, bucket, members)
+            if not bf.empty:
+                bf["family"] = fam
+                bucket_frames.append(bf)
+        fam_bucket_hist = pd.concat(bucket_frames, ignore_index=True) if bucket_frames else pd.DataFrame()
+        if fam_bucket_hist.empty:
+            continue
+        piv_val = fam_bucket_hist.pivot(index="date", columns="bucket", values="bucket_val")
+        piv_sig = fam_bucket_hist.pivot(index="date", columns="bucket", values="bucket_sig")
+        active = [b for b in bucket_weights if b in piv_val.columns]
+        if not active:
+            continue
+        w = pd.Series({b: bucket_weights[b] for b in active}, dtype=float)
+        w = w / w.sum()
+        comp = pd.DataFrame(index=piv_val.index.intersection(piv_sig.index))
+        comp["osc"] = (piv_val.loc[comp.index, active] * w).sum(axis=1)
+        comp["sig"] = (piv_sig.loc[comp.index, active] * w).sum(axis=1)
+        comp["family"] = fam
+        combo_parts.append(comp.reset_index())
+    if not combo_parts:
         return pd.DataFrame(), pd.DataFrame()
 
-    piv_osc = bucket_hist.pivot(index="date", columns="bucket", values="bucket_osc")
-    piv_sig = bucket_hist.pivot(index="date", columns="bucket", values="bucket_signal")
-    common = piv_osc.index.intersection(piv_sig.index)
-    piv_osc = piv_osc.loc[common].copy()
-    piv_sig = piv_sig.loc[common].copy()
+    # Average across families if combo has multiple parts
+    merged = pd.concat(combo_parts, ignore_index=True)
+    final = (
+        merged.groupby("date")
+        .agg(osc=("osc", "mean"), sig=("sig", "mean"))
+        .reset_index()
+        .sort_values("date")
+    )
+    final["gap"] = final["osc"] - final["sig"]
+    final["slope3"] = final["osc"].diff(3)
+    final["pct_rank"] = final["osc"].expanding(min_periods=40).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    )
+    final["slope_pct_rank"] = final["slope3"].expanding(min_periods=40).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    )
+    final["state"] = final.apply(classify_state_row, axis=1)
+    return final, merged
 
-    # Normalize weights to available columns
-    active = [b for b in bucket_weights if b in piv_osc.columns]
-    if not active:
-        return pd.DataFrame(), bucket_hist
-    w = pd.Series({b: bucket_weights[b] for b in active}, dtype=float)
-    w = w / w.sum()
-
-    holistic = pd.DataFrame(index=common)
-    holistic["holistic_osc"] = (piv_osc[active] * w).sum(axis=1)
-    holistic["holistic_signal"] = (piv_sig[active] * w).sum(axis=1)
-    holistic["slope3"] = holistic["holistic_osc"].diff(3)
-    holistic["gap"] = holistic["holistic_osc"] - holistic["holistic_signal"]
-    holistic = holistic.reset_index()
-    return holistic, bucket_hist
+def classify_state_row(row: pd.Series) -> str:
+    osc = safe_float(row.get("osc", np.nan))
+    sig = safe_float(row.get("sig", np.nan))
+    slope = safe_float(row.get("slope3", np.nan))
+    pct = safe_float(row.get("pct_rank", np.nan))
+    if pd.isna(osc) or pd.isna(sig):
+        return "Unknown"
+    if osc < 0 and osc < sig and slope <= 0 and pct <= 20:
+        return "Regime Down"
+    if osc < 0 and osc > sig and slope > 0 and pct <= 20:
+        return "Bounce"
+    if osc < 0 and osc > sig and slope > 0 and pct <= 45:
+        return "Repair"
+    if osc >= 0 and osc > sig and slope > 0 and pct < 85:
+        return "Regime Up"
+    if osc >= 0 and pct >= 85 and slope <= 0:
+        return "Overheating"
+    if osc >= 0 and osc < sig and slope < 0:
+        return "Fall"
+    return "Transitional"
 
 # ---------------------------------------------------------
-# Backtest logic
+# Forward stats / backtests
 # ---------------------------------------------------------
-def compute_positions(
-    osc: pd.Series,
-    sig: pd.Series,
-    trigger_rule: str,
-    exit_rule: str,
-) -> pd.Series:
-    osc = pd.to_numeric(osc, errors="coerce")
-    sig = pd.to_numeric(sig, errors="coerce")
-    up_signal = (osc > sig) & (osc.shift(1) <= sig.shift(1))
-    down_signal = (osc < sig) & (osc.shift(1) >= sig.shift(1))
-    up_zero = (osc > 0) & (osc.shift(1) <= 0)
-    down_zero = (osc < 0) & (osc.shift(1) >= 0)
-    bull_below_zero = up_signal & (osc < 0)
-    bear_above_zero = down_signal & (osc > 0)
+def signal_cross_up(osc: pd.Series, sig: pd.Series) -> pd.Series:
+    return (osc > sig) & (osc.shift(1) <= sig.shift(1))
 
-    entry = {
-        "signal_cross": up_signal,
-        "bull_cross_below_zero": bull_below_zero,
-        "zero_cross": up_zero,
-    }[trigger_rule]
+def signal_cross_down(osc: pd.Series, sig: pd.Series) -> pd.Series:
+    return (osc < sig) & (osc.shift(1) >= sig.shift(1))
 
-    exit_sig = {
-        "signal_cross_down": down_signal,
-        "zero_cross_down": down_zero,
-        "bear_cross_above_zero": bear_above_zero,
-    }[exit_rule]
+def zero_cross_up(osc: pd.Series) -> pd.Series:
+    return (osc > 0) & (osc.shift(1) <= 0)
 
-    pos = pd.Series(0.0, index=osc.index)
+def zero_cross_down(osc: pd.Series) -> pd.Series:
+    return (osc < 0) & (osc.shift(1) >= 0)
+
+def build_positions(reg_df: pd.DataFrame, entry_mode: str, exit_mode: str, lower_pct: float, upper_pct: float) -> pd.Series:
+    osc = reg_df["osc"]
+    sig = reg_df["sig"]
+    pct = reg_df["pct_rank"]
+    slope_pct = reg_df["slope_pct_rank"]
+
+    entry_cross = signal_cross_up(osc, sig)
+    entry_zero = zero_cross_up(osc)
+    exit_cross = signal_cross_down(osc, sig)
+    exit_zero = zero_cross_down(osc)
+
+    if entry_mode == "bull_cross_below_zero":
+        entry = entry_cross & (osc < 0) & (pct <= lower_pct) & (slope_pct >= 55)
+    elif entry_mode == "bull_cross_or_zero_from_washout":
+        entry = ((entry_cross & (osc < 0)) | entry_zero) & (pct <= lower_pct) & (slope_pct >= 55)
+    elif entry_mode == "repair_zone_turn":
+        entry = (osc > sig) & (osc < 0) & (pct <= lower_pct) & (slope_pct >= 60)
+    else:
+        entry = entry_cross
+
+    if exit_mode == "cross_from_positive_or_hot":
+        exit_ = (exit_cross & (osc > 0)) | ((pct >= upper_pct) & (slope_pct <= 45))
+    elif exit_mode == "zero_cross_down":
+        exit_ = exit_zero | ((pct >= upper_pct) & (slope_pct <= 45))
+    elif exit_mode == "hot_rollover":
+        exit_ = (pct >= upper_pct) & (slope_pct <= 45)
+    else:
+        exit_ = exit_cross
+
+    pos = pd.Series(0.0, index=reg_df.index)
     in_pos = False
     for i in range(len(pos)):
         if not in_pos and bool(entry.iloc[i]):
             in_pos = True
-        elif in_pos and bool(exit_sig.iloc[i]):
+        elif in_pos and bool(exit_.iloc[i]):
             in_pos = False
         pos.iloc[i] = 1.0 if in_pos else 0.0
     return pos
@@ -456,7 +461,7 @@ def backtest_long_cash(price: pd.Series, pos: pd.Series) -> Dict[str, Any]:
     eq = (1 + strat_ret).cumprod()
     bh = (1 + ret).cumprod()
 
-    if len(eq) < 10:
+    if len(eq) < 50:
         return {}
 
     years = max(len(eq) / 252.0, 1e-6)
@@ -476,18 +481,10 @@ def backtest_long_cash(price: pd.Series, pos: pd.Series) -> Dict[str, Any]:
         exits.append(px.index[-1])
 
     trade_rets = []
-    lead_bars = []
     for en, ex in zip(entries, exits):
         if ex <= en:
             continue
-        tr = float(px.loc[ex] / px.loc[en] - 1)
-        trade_rets.append(tr)
-        # crude lead measurement: bars until benchmark confirms positive 5-bar momentum
-        sub = px.loc[en:ex]
-        conf = sub.pct_change(5)
-        idx = conf[conf > 0].index
-        if len(idx):
-            lead_bars.append(int(sub.index.get_loc(idx[0])))
+        trade_rets.append(float(px.loc[ex] / px.loc[en] - 1))
 
     return {
         "equity": eq,
@@ -502,209 +499,43 @@ def backtest_long_cash(price: pd.Series, pos: pd.Series) -> Dict[str, Any]:
         "trades": int(len(trade_rets)),
         "win_rate": float(np.mean([x > 0 for x in trade_rets])) if trade_rets else np.nan,
         "avg_trade": float(np.mean(trade_rets)) if trade_rets else np.nan,
-        "avg_lead_bars": float(np.mean(lead_bars)) if lead_bars else np.nan,
         "pos": pos,
-        "strat_ret": strat_ret,
     }
 
-def score_model(stats: Dict[str, Any]) -> float:
-    if not stats:
-        return -999.0
-    sharpe = stats.get("sharpe", np.nan)
-    ret = stats.get("strategy_return", np.nan)
-    dd = abs(stats.get("max_dd", np.nan))
-    win = stats.get("win_rate", np.nan)
-    trades = stats.get("trades", 0)
-    if pd.isna(sharpe) or pd.isna(ret) or pd.isna(dd):
-        return -999.0
-    penalty = 0.0
-    if trades < 4:
-        penalty += 0.30
-    return float((1.8 * sharpe) + (1.2 * ret) - (1.0 * dd) + (0.4 * (0 if pd.isna(win) else win)) - penalty)
+def add_forward_returns(df: pd.DataFrame, price: pd.Series, horizons: List[int]) -> pd.DataFrame:
+    out = df.copy()
+    px = price.reindex(out["date"]).reset_index(drop=True)
+    for h in horizons:
+        out[f"fwd_{h}d"] = px.shift(-h) / px - 1
+    return out
 
-# ---------------------------------------------------------
-# Search grid
-# ---------------------------------------------------------
-def family_param_grid(family: str) -> List[Dict[str, Any]]:
-    f = family.upper()
-    if f == "TSI":
-        return [
-            {"long": 20, "short": 10, "signal": 5},
-            {"long": 25, "short": 13, "signal": 7},
-            {"long": 30, "short": 15, "signal": 7},
-            {"long": 35, "short": 15, "signal": 7},
-        ]
-    if f == "RSI":
-        return [{"length": x, "signal": 5} for x in [7, 10, 14, 21]]
-    if f == "CCI":
-        return [{"length": x, "signal": 5} for x in [10, 14, 20, 30]]
-    if f == "ROC":
-        return [{"length": x, "signal": 5} for x in [5, 7, 10, 14]]
-    if f == "BB%":
-        return [{"length": x, "std": s, "signal": 5} for x in [10, 20] for s in [2.0, 2.5]]
-    return []
-
-def bucket_weight_grid() -> List[Dict[str, float]]:
-    combos = []
-    vals = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
-    for b in vals:
-        for l in vals:
-            r = round(1.0 - b - l, 2)
-            if r < 0.10 or r > 0.40:
-                continue
-            combos.append({"breadth": b, "leadership": l, "risk": r})
-    # Deduplicate rounding artifacts
-    uniq = []
-    seen = set()
-    for x in combos:
-        key = tuple(round(x[k], 2) for k in ["breadth", "leadership", "risk"])
-        if abs(sum(key) - 1.0) < 1e-6 and key not in seen:
-            seen.add(key)
-            uniq.append(x)
-    return uniq
-
-@dataclass
-class SearchConfig:
-    benchmark: str
-    oscillator_families: List[str]
-    trigger_rules: List[str]
-    exit_rules: List[str]
-    top_n: int = 20
-    use_component_weights: bool = True
-    max_models: int = 500
-    save_every: int = 20
-
-
-def run_search(hist: pd.DataFrame, config: SearchConfig) -> Tuple[pd.DataFrame, Dict[str, Any], pd.DataFrame]:
-    piv_close = hist.pivot(index="date", columns="symbol", values="close").sort_index()
-    if config.benchmark not in piv_close.columns:
-        raise ValueError(f"Benchmark {config.benchmark} not found in uploaded history.")
-    benchmark_price = piv_close[config.benchmark].dropna()
-
-    results = []
-    best_payload = {}
-    preview_plot = pd.DataFrame()
-
-    grids = []
-    for fam in config.oscillator_families:
-        for params in family_param_grid(fam):
-            grids.append((fam, params))
-    bw_grid = bucket_weight_grid()
-
-    total_models = len(grids) * len(bw_grid) * len(config.trigger_rules) * len(config.exit_rules)
-    if total_models > config.max_models:
-        step = int(math.ceil(total_models / config.max_models))
-        bw_grid = bw_grid[::step]
-        total_models = len(grids) * len(bw_grid) * len(config.trigger_rules) * len(config.exit_rules)
-
-    progress = st.progress(0.0, text="Searching oscillator sweet spots...")
-    status = st.empty()
-    live_table = st.empty()
-    done = 0
-
-    def flush_partial():
-        if results:
-            partial = pd.DataFrame(results).sort_values(["score", "sharpe", "alpha_return"], ascending=False).reset_index(drop=True)
-            partial.to_csv(PARTIAL_RESULTS_PATH, index=False)
-            live_table.dataframe(partial.head(config.top_n), width="stretch", hide_index=True)
-        if best_payload:
-            try:
-                pd.DataFrame(best_payload["holistic_hist"]).to_parquet(BEST_PREVIEW_PATH, index=False)
-                eq_df = pd.DataFrame({
-                    "date": best_payload["equity"].index,
-                    "strategy": best_payload["equity"].values,
-                    "buyhold": best_payload["benchmark_equity"].values,
-                })
-                eq_df.to_parquet(BEST_EQUITY_PATH, index=False)
-            except Exception:
-                pass
-
-    for fam, params in grids:
-        osc_df = build_symbol_oscillators(hist, fam, json.dumps(params, sort_keys=True))
-        for weights in bw_grid:
-            holistic_hist, bucket_hist = build_holistic_composite(
-                osc_df, weights, use_component_weights=config.use_component_weights
-            )
-            if holistic_hist.empty:
-                done += len(config.trigger_rules) * len(config.exit_rules)
-                progress.progress(min(done / max(total_models, 1), 1.0), text=f"Searching oscillator sweet spots... {done}/{total_models}")
-                continue
-
-            comp = holistic_hist.set_index("date").reindex(benchmark_price.index).dropna(subset=["holistic_osc", "holistic_signal"])
-            if comp.empty:
-                done += len(config.trigger_rules) * len(config.exit_rules)
-                progress.progress(min(done / max(total_models, 1), 1.0), text=f"Searching oscillator sweet spots... {done}/{total_models}")
-                continue
-
-            price = benchmark_price.reindex(comp.index).dropna()
-            comp = comp.reindex(price.index).dropna()
-
-            for trig in config.trigger_rules:
-                for ex in config.exit_rules:
-                    pos = compute_positions(comp["holistic_osc"], comp["holistic_signal"], trig, ex)
-                    stats = backtest_long_cash(price, pos)
-                    if stats:
-                        model_score = score_model(stats)
-                        row = {
-                            "score": model_score,
-                            "family": fam,
-                            "params": json.dumps(params),
-                            "bucket_weights": json.dumps(weights),
-                            "trigger": trig,
-                            "exit": ex,
-                            "return": stats["strategy_return"],
-                            "benchmark_return": stats["benchmark_return"],
-                            "alpha_return": stats["strategy_return"] - stats["benchmark_return"],
-                            "cagr": stats["strategy_cagr"],
-                            "benchmark_cagr": stats["benchmark_cagr"],
-                            "max_dd": stats["max_dd"],
-                            "sharpe": stats["sharpe"],
-                            "trades": stats["trades"],
-                            "win_rate": stats["win_rate"],
-                            "avg_trade": stats["avg_trade"],
-                            "avg_lead_bars": stats["avg_lead_bars"],
-                        }
-                        results.append(row)
-
-                        if not best_payload or model_score > best_payload.get("score", -999):
-                            best_payload = {
-                                **row,
-                                "holistic_hist": comp.reset_index(),
-                                "equity": stats["equity"],
-                                "benchmark_equity": stats["benchmark_equity"],
-                                "bucket_hist": bucket_hist,
-                            }
-                            preview_plot = comp.reset_index().copy()
-
-                    done += 1
-                    progress.progress(min(done / max(total_models, 1), 1.0), text=f"Searching oscillator sweet spots... {done}/{total_models}")
-                    if done % max(config.save_every, 1) == 0:
-                        status.info(f"Checkpoint saved at {done}/{total_models}.")
-                        flush_partial()
-
-    flush_partial()
-    progress.empty()
-    status.success(f"Search complete. Evaluated {done} model tests.")
-    res_df = pd.DataFrame(results).sort_values(["score", "sharpe", "alpha_return"], ascending=False).reset_index(drop=True) if results else pd.DataFrame()
-    return res_df.head(config.top_n), best_payload, preview_plot
-
+def heatmap_table(df: pd.DataFrame, horizons: List[int]) -> pd.DataFrame:
+    bins = [0, 10, 20, 35, 50, 65, 80, 90, 100]
+    labels = ["0-10", "10-20", "20-35", "35-50", "50-65", "65-80", "80-90", "90-100"]
+    temp = df.copy()
+    temp["zone"] = pd.cut(temp["pct_rank"], bins=bins, labels=labels, include_lowest=True)
+    rows = []
+    for zone, g in temp.groupby("zone", observed=True):
+        row = {"Percentile Zone": zone}
+        for h in horizons:
+            row[f"{h}D Avg"] = g[f"fwd_{h}d"].mean()
+            row[f"{h}D Med"] = g[f"fwd_{h}d"].median()
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 # ---------------------------------------------------------
 # Charts
 # ---------------------------------------------------------
-def plot_oscillator(df: pd.DataFrame, title: str, osc_col: str, sig_col: str) -> go.Figure:
+def plot_oscillator(df: pd.DataFrame, title: str) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["date"], y=df[osc_col], mode="lines", name="Oscillator", line=dict(width=3)))
-    fig.add_trace(go.Scatter(x=df["date"], y=df[sig_col], mode="lines", name="Signal", line=dict(width=2)))
+    fig.add_trace(go.Scatter(x=df["date"], y=df["osc"], mode="lines", name="Oscillator", line=dict(width=3)))
+    fig.add_trace(go.Scatter(x=df["date"], y=df["sig"], mode="lines", name="Signal", line=dict(width=2)))
     fig.add_hline(y=0, line_width=1, opacity=0.35)
     fig.update_layout(
-        title=title,
-        template="plotly_white",
-        height=420,
+        title=title, template="plotly_white", height=420,
         margin=dict(l=30, r=20, t=50, b=30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        xaxis_title="Date",
-        yaxis_title="Oscillator",
+        xaxis_title="Date", yaxis_title="Oscillator",
     )
     return fig
 
@@ -714,13 +545,42 @@ def plot_equity(eq: pd.Series, bh: pd.Series, title: str) -> go.Figure:
     fig.add_trace(go.Scatter(x=df["index"], y=df["Strategy"], mode="lines", name="Strategy", line=dict(width=3)))
     fig.add_trace(go.Scatter(x=df["index"], y=df["BuyHold"], mode="lines", name="Buy & Hold", line=dict(width=2)))
     fig.update_layout(
-        title=title,
-        template="plotly_white",
-        height=420,
+        title=title, template="plotly_white", height=420,
         margin=dict(l=30, r=20, t=50, b=30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        xaxis_title="Date",
-        yaxis_title="Growth of $1",
+        xaxis_title="Date", yaxis_title="Growth of $1",
+    )
+    return fig
+
+def plot_bell_curve(df: pd.DataFrame, current_value: float, title: str) -> go.Figure:
+    hist = df["osc"].dropna()
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(x=hist, histnorm="probability density", nbinsx=50, name="History"))
+    fig.add_vline(x=current_value, line_width=3, annotation_text=f"Current {current_value:.2f}")
+    fig.update_layout(
+        title=title, template="plotly_white", height=380,
+        margin=dict(l=30, r=20, t=50, b=30), xaxis_title="Oscillator", yaxis_title="Density",
+        showlegend=False
+    )
+    return fig
+
+def plot_heatmap(ht: pd.DataFrame, horizons: List[int]) -> go.Figure:
+    z = ht[[f"{h}D Avg" for h in horizons]].to_numpy(dtype=float)
+    fig = go.Figure(data=go.Heatmap(
+        z=z,
+        x=[f"{h}D Avg" for h in horizons],
+        y=ht["Percentile Zone"],
+        text=np.round(z * 100, 2),
+        texttemplate="%{text}%",
+        colorbar_title="Return",
+    ))
+    fig.update_layout(
+        title="Forward returns by oscillator percentile zone",
+        template="plotly_white",
+        height=380,
+        margin=dict(l=30, r=20, t=50, b=30),
+        xaxis_title="Forward horizon",
+        yaxis_title="Oscillator percentile zone",
     )
     return fig
 
@@ -729,36 +589,31 @@ def plot_equity(eq: pd.Series, bh: pd.Series, title: str) -> go.Figure:
 # ---------------------------------------------------------
 def main() -> None:
     with st.sidebar:
-        st.markdown("### Configuration")
+        st.markdown("### Inputs")
         zip_file = st.file_uploader("Historical ZIP", type=["zip"])
+        phase1_file = st.file_uploader("Optional: Phase 1 top-results CSV", type=["csv"])
         benchmark = st.selectbox("Benchmark", ["RSP", "SPY"], index=0)
-        families = st.multiselect("Oscillator families to search", OSCILLATOR_CHOICES, default=["TSI", "RSI", "CCI", "ROC", "BB%"])
-        trig_rules = st.multiselect("Entry trigger rules", TRIGGER_CHOICES, default=["signal_cross", "bull_cross_below_zero", "zero_cross"])
-        exit_rules = st.multiselect("Exit rules", EXIT_CHOICES, default=["signal_cross_down", "zero_cross_down"])
-        top_n = st.slider("Top results to keep", 5, 50, 15, 1)
-        max_models = st.slider("Search budget (max model tests)", 100, 3000, 200, 100)
-        save_every = st.slider("Checkpoint every N tests", 5, 100, 20, 5)
-        use_component_weights = st.toggle("Use custom component weights", value=True)
-        run_btn = st.button("Run oscillator sweet-spot search", type="primary", width="stretch")
-
-        best_saved = load_json(MODEL_PATH, {})
-        if best_saved:
-            st.caption("Saved best model is available from prior run.")
-        if PARTIAL_RESULTS_PATH.exists():
-            st.caption("Partial results from a prior run are available below.")
+        entry_mode = st.selectbox(
+            "Entry logic",
+            ["bull_cross_below_zero", "bull_cross_or_zero_from_washout", "repair_zone_turn"],
+            index=0,
+        )
+        exit_mode = st.selectbox(
+            "Exit logic",
+            ["cross_from_positive_or_hot", "zero_cross_down", "hot_rollover"],
+            index=0,
+        )
+        lower_pct = st.slider("Lower percentile for entries", 5, 40, 25, 5)
+        upper_pct = st.slider("Upper percentile for exits", 60, 95, 85, 5)
+        lookback = st.selectbox("Chart window", ["6M", "1Y", "2Y", "3Y", "5Y", "MAX"], index=2)
+        run_btn = st.button("Build Phase 2 models", type="primary", width="stretch")
 
     if not zip_file:
-        st.info("Upload your StockCharts ZIP to start the oscillator search.")
+        st.info("Upload your historical StockCharts ZIP to start Phase 2.")
         return
 
-    try:
-        daily_df, weekly_df = parse_stockcharts_zip(zip_file.read())
-    except Exception as e:
-        st.error(f"Could not parse ZIP: {e}")
-        return
-
+    daily_df, weekly_df = parse_stockcharts_zip(zip_file.read())
     symbols = sorted(daily_df["symbol"].dropna().unique().tolist())
-    have_benchmark = benchmark in symbols
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -766,138 +621,199 @@ def main() -> None:
     with c2:
         st.markdown(f"<div class='kpi'><div class='kpi-title'>Rows</div><div class='kpi-value'>{len(daily_df):,}</div></div>", unsafe_allow_html=True)
     with c3:
-        st.markdown(f"<div class='kpi'><div class='kpi-title'>Date range</div><div class='kpi-value' style='font-size:1.1rem'>{daily_df['date'].min().date()} → {daily_df['date'].max().date()}</div></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='kpi'><div class='kpi-title'>Date range</div><div class='kpi-value' style='font-size:1.05rem'>{daily_df['date'].min().date()} → {daily_df['date'].max().date()}</div></div>", unsafe_allow_html=True)
     with c4:
-        pill = "green" if have_benchmark else "red"
-        text = "Present" if have_benchmark else "Missing"
-        st.markdown(f"<div class='kpi'><div class='kpi-title'>Benchmark {benchmark}</div><div class='kpi-value' style='font-size:1.2rem'>{text}</div><div class='small'>{benchmark}</div></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='kpi'><div class='kpi-title'>Benchmark</div><div class='kpi-value' style='font-size:1.25rem'>{benchmark}</div></div>", unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs(["Research Lab", "Best Model", "Data Check"])
-
-    with tab1:
+    if phase1_file is not None:
         st.markdown("<div class='soft-card'>", unsafe_allow_html=True)
-        st.subheader("Oscillator sweet-spot search")
-        st.markdown(
-            "This searches oscillator family, oscillator parameters, bucket weights, and entry/exit triggers. "
-            "The score favors higher Sharpe, better total return, lower drawdown, and enough trades."
+        st.subheader("Imported Phase 1 winners")
+        p1 = pd.read_csv(phase1_file)
+        st.dataframe(p1.head(15), width="stretch", hide_index=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if not run_btn:
+        st.info("Click **Build Phase 2 models** to compare the hybrid and combo oscillators.")
+        return
+
+    # Parameter map centered on your research
+    params_map = {
+        "TSI": {"long": 25, "short": 13, "signal": 7},
+        "BB": {"length": 20, "std": 2.0, "signal": 5},
+        "ROC": {"length": 10, "signal": 5},
+        "CCI": {"length": 20, "signal": 5},
+    }
+
+    piv_close = daily_df.pivot(index="date", columns="symbol", values="close").sort_index()
+    if benchmark not in piv_close.columns:
+        st.error(f"Benchmark {benchmark} is missing from the history.")
+        return
+    benchmark_price = piv_close[benchmark].dropna()
+
+    results = []
+    model_payloads: Dict[str, Dict[str, Any]] = {}
+    progress = st.progress(0.0, text="Building Phase 2 models...")
+    items = list(MODEL_LIBRARY.items())
+
+    for i, (model_name, spec) in enumerate(items, start=1):
+        hist, raw_parts = build_combo_hist(daily_df, spec["bucket_weights"], spec["combo"], params_map)
+        if hist.empty:
+            continue
+        comp = hist.set_index("date").reindex(benchmark_price.index).dropna(subset=["osc", "sig"])
+        price = benchmark_price.reindex(comp.index).dropna()
+        comp = comp.reindex(price.index).dropna()
+        comp = comp.reset_index()
+
+        pos = build_positions(comp, entry_mode, exit_mode, lower_pct, upper_pct)
+        stats = backtest_long_cash(price, pos)
+
+        comp["position"] = pos.values
+        comp = add_forward_returns(comp, price, [5, 10, 20, 40])
+        current = comp.iloc[-1]
+        heat = heatmap_table(comp, [5, 10, 20, 40])
+
+        row = {
+            "model": model_name,
+            "combo": spec["combo"],
+            "bucket_weights": json.dumps(spec["bucket_weights"]),
+            "return": stats.get("strategy_return", np.nan),
+            "benchmark_return": stats.get("benchmark_return", np.nan),
+            "alpha_return": stats.get("strategy_return", np.nan) - stats.get("benchmark_return", np.nan),
+            "cagr": stats.get("strategy_cagr", np.nan),
+            "benchmark_cagr": stats.get("benchmark_cagr", np.nan),
+            "max_dd": stats.get("max_dd", np.nan),
+            "sharpe": stats.get("sharpe", np.nan),
+            "trades": stats.get("trades", np.nan),
+            "win_rate": stats.get("win_rate", np.nan),
+            "avg_trade": stats.get("avg_trade", np.nan),
+            "current_osc": current["osc"],
+            "current_sig": current["sig"],
+            "current_pct": current["pct_rank"],
+            "current_slope_pct": current["slope_pct_rank"],
+            "current_state": current["state"],
+        }
+        results.append(row)
+        model_payloads[model_name] = {
+            "hist": comp,
+            "equity": stats.get("equity", pd.Series(dtype=float)),
+            "benchmark_equity": stats.get("benchmark_equity", pd.Series(dtype=float)),
+            "heat": heat,
+            "raw_parts": raw_parts,
+        }
+        progress.progress(i / len(items), text=f"Building Phase 2 models... {i}/{len(items)}")
+
+    progress.empty()
+
+    res_df = pd.DataFrame(results).sort_values(["alpha_return", "sharpe", "max_dd"], ascending=[False, False, False]).reset_index(drop=True)
+    if res_df.empty:
+        st.warning("No models were built.")
+        return
+
+    st.session_state["phase2_results"] = res_df
+    st.session_state["phase2_payloads"] = model_payloads
+
+    # Apply lookback
+    lb_map = {"6M": 126, "1Y": 252, "2Y": 504, "3Y": 756, "5Y": 1260}
+    tabs = st.tabs(["Leaderboard", "Best Model", "Bell Curve", "Forward Heatmap", "Diagnostics"])
+
+    with tabs[0]:
+        st.markdown("<div class='soft-card'>", unsafe_allow_html=True)
+        st.subheader("Phase 2 leaderboard")
+        st.dataframe(
+            res_df.assign(
+                return_pct=lambda x: (x["return"] * 100).round(2),
+                benchmark_return_pct=lambda x: (x["benchmark_return"] * 100).round(2),
+                alpha_pct=lambda x: (x["alpha_return"] * 100).round(2),
+                max_dd_pct=lambda x: (x["max_dd"] * 100).round(2),
+                win_rate_pct=lambda x: (x["win_rate"] * 100).round(1),
+            ),
+            width="stretch",
+            hide_index=True,
         )
-        if run_btn:
-            try:
-                cfg = SearchConfig(
-                    benchmark=benchmark,
-                    oscillator_families=families,
-                    trigger_rules=trig_rules,
-                    exit_rules=exit_rules,
-                    top_n=top_n,
-                    use_component_weights=use_component_weights,
-                    max_models=max_models,
-                    save_every=save_every,
-                )
-                res_df, best_payload, preview_plot = run_search(daily_df, cfg)
-                if res_df.empty:
-                    st.warning("No valid models were produced. Try fewer restrictions or a larger search budget.")
-                else:
-                    st.session_state["lab_results"] = res_df
-                    st.session_state["best_payload"] = best_payload
-                    serializable = {
-                        k: v for k, v in best_payload.items()
-                        if k not in {"holistic_hist", "equity", "benchmark_equity", "bucket_hist"}
-                    }
-                    save_json(MODEL_PATH, serializable)
-
-                    st.success(f"Search complete. Ranked {len(res_df)} top models.")
-                    st.dataframe(
-                        res_df.assign(
-                            return_pct=lambda x: (x["return"] * 100).round(2),
-                            benchmark_return_pct=lambda x: (x["benchmark_return"] * 100).round(2),
-                            alpha_pct=lambda x: (x["alpha_return"] * 100).round(2),
-                            max_dd_pct=lambda x: (x["max_dd"] * 100).round(2),
-                            win_rate_pct=lambda x: (x["win_rate"] * 100).round(1),
-                        ),
-                        width="stretch",
-                        hide_index=True,
-                    )
-            except Exception as e:
-                st.exception(e)
-        elif "lab_results" in st.session_state:
-            st.dataframe(st.session_state["lab_results"], width="stretch", hide_index=True)
-        elif PARTIAL_RESULTS_PATH.exists():
-            st.warning("Showing partial results from the last checkpointed run.")
-            st.dataframe(pd.read_csv(PARTIAL_RESULTS_PATH).head(top_n), width="stretch", hide_index=True)
-        else:
-            st.info("Click **Run oscillator sweet-spot search** to rank the best models.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with tab2:
-        payload = st.session_state.get("best_payload", {})
-        if not payload and BEST_PREVIEW_PATH.exists() and BEST_EQUITY_PATH.exists() and MODEL_PATH.exists():
-            payload = load_json(MODEL_PATH, {})
-            try:
-                payload["holistic_hist"] = pd.read_parquet(BEST_PREVIEW_PATH)
-                eq_df = pd.read_parquet(BEST_EQUITY_PATH)
-                payload["equity"] = pd.Series(eq_df["strategy"].values, index=pd.to_datetime(eq_df["date"]))
-                payload["benchmark_equity"] = pd.Series(eq_df["buyhold"].values, index=pd.to_datetime(eq_df["date"]))
-                payload["bucket_hist"] = pd.DataFrame()
-            except Exception:
-                payload = {}
-        if not payload:
-            st.info("Run the search first. Then the best model will appear here.")
-        else:
-            params = json.loads(payload["params"])
-            weights = json.loads(payload["bucket_weights"])
+    best_name = res_df.iloc[0]["model"]
+    best_payload = model_payloads[best_name]
+    best_hist = best_payload["hist"].copy()
+    if lookback != "MAX":
+        n = lb_map[lookback]
+        best_hist = best_hist.tail(n)
 
-            a, b, c, d, e = st.columns(5)
-            cards = [
-                ("Family", payload["family"]),
-                ("Sharpe", fmt_num(payload["sharpe"], 2)),
-                ("Return", f"{payload['return']*100:.1f}%"),
-                ("Max DD", f"{payload['max_dd']*100:.1f}%"),
-                ("Trades", f"{int(payload['trades'])}"),
-            ]
-            for col, (title, value) in zip([a, b, c, d, e], cards):
-                with col:
-                    st.markdown(f"<div class='kpi'><div class='kpi-title'>{title}</div><div class='kpi-value' style='font-size:1.25rem'>{value}</div></div>", unsafe_allow_html=True)
-
-            st.markdown(
-                f"<span class='pill blue'>Params: {params}</span>"
-                f"<span class='pill green'>Weights: {weights}</span>"
-                f"<span class='pill yellow'>Entry: {payload['trigger']}</span>"
-                f"<span class='pill red'>Exit: {payload['exit']}</span>",
-                unsafe_allow_html=True,
-            )
-
-            hist = payload["holistic_hist"].copy()
-            eq = payload["equity"]
-            bh = payload["benchmark_equity"]
-
-            c1, c2 = st.columns([1.15, 1.0])
-            with c1:
-                st.plotly_chart(
-                    plot_oscillator(hist, f"Best holistic oscillator vs signal — {payload['family']}", "holistic_osc", "holistic_signal"),
-                    width="stretch",
-                )
-            with c2:
-                st.plotly_chart(
-                    plot_equity(eq, bh, f"{benchmark} strategy vs buy-and-hold"),
-                    width="stretch",
-                )
-
-            with st.expander("Bucket contribution detail", expanded=False):
-                bucket_hist = payload["bucket_hist"]
-                if isinstance(bucket_hist, pd.DataFrame) and not bucket_hist.empty:
-                    st.dataframe(bucket_hist.sort_values(["date", "bucket"]).tail(60), width="stretch", hide_index=True)
-                else:
-                    st.info("No bucket detail available.")
-
-    with tab3:
+    with tabs[1]:
         st.markdown("<div class='soft-card'>", unsafe_allow_html=True)
-        st.subheader("Data check")
-        st.markdown("Use this to confirm the ZIP parsed the expected symbols.")
-        piv = daily_df.pivot(index="date", columns="symbol", values="close").sort_index()
-        latest = piv.tail(5).reset_index()
-        st.dataframe(latest, width="stretch")
+        st.subheader(f"Best model: {best_name}")
+        meta = res_df.iloc[0]
+        st.markdown(
+            f"<span class='pill blue'>Combo: {meta['combo']}</span>"
+            f"<span class='pill green'>State: {meta['current_state']}</span>"
+            f"<span class='pill yellow'>Current Percentile: {meta['current_pct']:.1f}%</span>"
+            f"<span class='pill red'>Current Slope Percentile: {meta['current_slope_pct']:.1f}%</span>",
+            unsafe_allow_html=True,
+        )
+        a, b, c, d, e = st.columns(5)
+        cards = [
+            ("Return", f"{meta['return']*100:.1f}%"),
+            ("Alpha vs BH", f"{meta['alpha_return']*100:.1f}%"),
+            ("Sharpe", fmt_num(meta["sharpe"], 2)),
+            ("Max DD", f"{meta['max_dd']*100:.1f}%"),
+            ("Trades", f"{int(meta['trades'])}"),
+        ]
+        for col, (title, value) in zip([a, b, c, d, e], cards):
+            with col:
+                st.markdown(f"<div class='kpi'><div class='kpi-title'>{title}</div><div class='kpi-value' style='font-size:1.25rem'>{value}</div></div>", unsafe_allow_html=True)
+
+        c1, c2 = st.columns([1.15, 1.0])
+        with c1:
+            st.plotly_chart(plot_oscillator(best_hist, f"{best_name} oscillator vs signal"), width="stretch")
+        with c2:
+            st.plotly_chart(plot_equity(best_payload["equity"], best_payload["benchmark_equity"], f"{benchmark}: strategy vs buy-and-hold"), width="stretch")
         st.markdown("</div>", unsafe_allow_html=True)
 
+    with tabs[2]:
+        st.markdown("<div class='soft-card'>", unsafe_allow_html=True)
+        st.subheader("Bell-curve regime map")
+        current_val = safe_float(best_payload["hist"]["osc"].iloc[-1])
+        st.plotly_chart(plot_bell_curve(best_payload["hist"], current_val, f"{best_name} historical oscillator distribution"), width="stretch")
+        st.markdown(
+            f"""
+            **Current state:** {meta['current_state']}  
+            **Current oscillator percentile:** {meta['current_pct']:.1f}%  
+            **Interpretation:** lower percentiles are more washed-out / repair-like, while upper percentiles are more stretched / overheating-like.
+            """
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tabs[3]:
+        st.markdown("<div class='soft-card'>", unsafe_allow_html=True)
+        st.subheader("Forward-return sweet spot map")
+        heat = best_payload["heat"]
+        st.plotly_chart(plot_heatmap(heat, [5, 10, 20, 40]), width="stretch")
+        st.dataframe(
+            heat.assign(**{c: lambda x, col=c: (x[col] * 100).round(2) for c in heat.columns if c != "Percentile Zone"}),
+            width="stretch",
+            hide_index=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tabs[4]:
+        st.markdown("<div class='soft-card'>", unsafe_allow_html=True)
+        st.subheader("Diagnostics")
+        st.markdown("Compare all model states and current locations.")
+        diag = res_df[["model", "combo", "current_state", "current_pct", "current_slope_pct", "return", "alpha_return", "sharpe", "max_dd", "trades"]].copy()
+        st.dataframe(
+            diag.assign(
+                return_pct=lambda x: (x["return"] * 100).round(2),
+                alpha_pct=lambda x: (x["alpha_return"] * 100).round(2),
+                max_dd_pct=lambda x: (x["max_dd"] * 100).round(2),
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+        with st.expander("Best model raw component history", expanded=False):
+            raw_parts = best_payload["raw_parts"].copy()
+            st.dataframe(raw_parts.tail(200), width="stretch", hide_index=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
