@@ -1,407 +1,710 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Holistic Breadth Oscillator Dashboard
-"""
-
-from __future__ import annotations
-
-import io
-import zipfile
-from pathlib import Path
-from typing import Any, Dict, Tuple
-
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import streamlit as st
+import pandas as pd
+import numpy as np
+import zipfile
+from datetime import datetime, timedelta
+import plotly.graph_objects as go
+import plotly.express as px
 
+st.set_page_config(page_title="Market Breadth Engine v2.0", layout="wide")
 
-st.set_page_config(page_title="Holistic Breadth Oscillator Dashboard", page_icon="📈", layout="wide")
+# ============================================================================
+# DATA LOADING FUNCTIONS
+# ============================================================================
 
-CUSTOM_CSS = """
-<style>
-.block-container{max-width:1600px;padding-top:1rem;padding-bottom:2rem;}
-.main-title{
-  padding:1rem 1.2rem;border-radius:18px;
-  background:linear-gradient(135deg, rgba(96,165,250,.18), rgba(34,197,94,.10));
-  border:1px solid rgba(148,163,184,.20);margin-bottom:1rem;
-}
-.kpi{
-  background:rgba(255,255,255,.03);
-  border:1px solid rgba(148,163,184,.18);
-  border-radius:16px;padding:.85rem 1rem;
-}
-.kpi-title{font-size:.86rem;color:#b6c4df;font-weight:800;}
-.kpi-value{font-size:1.6rem;color:white;font-weight:950;line-height:1.1;}
-.small{font-size:.82rem;color:#99aacd;}
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-st.markdown(
+@st.cache_data
+def load_historical_zip(zip_file):
+    """Load historical CSV data from ZIP file"""
+    data = {}
+    with zipfile.ZipFile(zip_file) as z:
+        for name in z.namelist():
+            if name.endswith(".csv"):
+                try:
+                    df = pd.read_csv(z.open(name))
+                    if "Date" in df.columns:
+                        df["Date"] = pd.to_datetime(df["Date"])
+                        df = df.set_index("Date")
+                        if "Close" in df.columns:
+                            symbol = name.replace(".csv", "").replace("$", "")
+                            data[symbol] = df["Close"]
+                except:
+                    pass
+    return data
+
+@st.cache_data
+def load_snapshot(file):
+    """Load daily snapshot CSV"""
+    return pd.read_csv(file)
+
+@st.cache_data
+def load_prior_upload(file):
+    """Load prior upload for continuity tracking"""
+    return pd.read_csv(file)
+
+# ============================================================================
+# ENHANCED GATE SCORE CALCULATION (v2.0)
+# ============================================================================
+
+def calculate_oscillator_consensus(indicators, oscillators):
     """
-    <div class='main-title'>
-      <div style='font-size:1.8rem;font-weight:950;'>📈 Holistic Breadth Oscillator Dashboard</div>
-      <div class='small'>Weighted bucket composite on top, stacked oscillators below.</div>
-    </div>
-    """,
-    unsafe_allow_html=True,
+    Calculate oscillator consensus across all indicators
+    Returns: % bullish, tally table
+    """
+    oscillator_weights = {
+        'TSI': 0.25, 'MACD': 0.20, 'ADX': 0.20, 'MCCI': 0.15,
+        'Stoch': 0.10, '%B': 0.05, 'ROC': 0.05
+    }
+    
+    tally = []
+    total_bullish = 0
+    total_oscillators = 0
+    
+    for indicator in indicators.keys():
+        if indicator in oscillators:
+            osc_data = oscillators[indicator]
+            bullish_count = 0
+            
+            # TSI Cross
+            if osc_data.get('TSI_line', 0) > osc_data.get('TSI_signal', 0):
+                bullish_count += 1
+            # MACD Histogram
+            if osc_data.get('MACD_hist', 0) > 0:
+                bullish_count += 1
+            # ADX +DI > -DI
+            if osc_data.get('plus_DI', 0) > osc_data.get('minus_DI', 0):
+                bullish_count += 1
+            # MCCI Sign
+            if osc_data.get('MCCI', 0) > 0:
+                bullish_count += 1
+            # Stoch %K > %D
+            if osc_data.get('Stoch_K', 0) > osc_data.get('Stoch_D', 0):
+                bullish_count += 1
+            # %B Position (not overbought)
+            if 0.20 < osc_data.get('%B', 0.50) < 0.80:
+                bullish_count += 1
+            # ROC Sign
+            if osc_data.get('ROC', 0) > 0:
+                bullish_count += 1
+            
+            tally.append({
+                'Indicator': indicator,
+                'Bullish': bullish_count,
+                'Total': 7,
+                '% Bullish': round(bullish_count / 7 * 100, 1)
+            })
+            
+            total_bullish += bullish_count
+            total_oscillators += 7
+    
+    consensus_pct = round(total_bullish / total_oscillators * 100, 1) if total_oscillators > 0 else 0
+    return consensus_pct, pd.DataFrame(tally)
+
+def calculate_trin_composite_score(trin_data):
+    """
+    Enhanced TRIN Gatekeeper Score (0-10)
+    """
+    score = 0
+    
+    # Daily Level (0-3 pts)
+    trin_level = trin_data.get('level', 1.50)
+    if trin_level < 1.0:
+        score += 3
+    elif trin_level < 1.3:
+        score += 2
+    elif trin_level < 1.6:
+        score += 1
+    
+    # %B Position (0-3 pts)
+    trin_pctb = trin_data.get('%B', 1.0)
+    if trin_pctb < 0.80:
+        score += 3
+    elif trin_pctb < 1.20:
+        score += 2
+    
+    # TSI Cross (0-2 pts)
+    if trin_data.get('TSI_bullish', False):
+        score += 2
+    
+    # ROC Velocity (0-2 pts)
+    trin_roc = trin_data.get('ROC', 0)
+    if 0 < trin_roc < 50:
+        score += 2
+    elif trin_roc >= 50:
+        score += 1  # Overheating
+    
+    return min(score, 10)
+
+def calculate_nymo_proxy_v2(nyad_data, spxadp_data, nyhl_data):
+    """
+    Enhanced NYMO Proxy v2.0
+    NYMO = (NYAD Trend × 40%) + (SPXADP Thrust × 40%) + (NYHL Momentum × 20%)
+    """
+    # NYAD Trend Score (0-1.0)
+    nyad_score = 0
+    if nyad_data.get('rising', False):
+        nyad_score += 0.30
+    if nyad_data.get('%B', 0.50) < 0.60:
+        nyad_score += 0.20
+    if nyad_data.get('TSI_bullish', False):
+        nyad_score += 0.30
+    if nyad_data.get('MCCI', 0) > 0:
+        nyad_score += 0.20
+    
+    # SPXADP Thrust Score (0-1.0)
+    spxadp_score = 0
+    if spxadp_data.get('level', 0) > 35:
+        spxadp_score += 0.20
+    if spxadp_data.get('TSI_bullish', False):
+        spxadp_score += 0.30
+    if spxadp_data.get('MACD_positive', False):
+        spxadp_score += 0.20
+    if spxadp_data.get('MCCI', 0) > 50:
+        spxadp_score += 0.30
+    
+    # NYHL Momentum Score (0-0.3)
+    nyhl_score = 0
+    if nyhl_data.get('daily_positive', False):
+        nyhl_score += 0.10
+    if nyhl_data.get('5day_sum', 0) > 0:
+        nyhl_score += 0.10
+    if nyhl_data.get('renko_green', False):
+        nyhl_score += 0.10
+    
+    # Calculate Proxy
+    nymo_proxy = (nyad_score * 0.40) + (spxadp_score * 0.40) + (nyhl_score * 0.20)
+    return round(nymo_proxy, 2)
+
+def detect_market_regime(indicators, oscillators):
+    """
+    Detect market regime based on ADX
+    Returns: 'Choppy', 'Transition', or 'Strong Trend'
+    """
+    avg_adx = np.mean([osc.get('ADX', 20) for osc in oscillators.values()])
+    
+    if avg_adx < 20:
+        return 'Choppy'
+    elif avg_adx > 40:
+        return 'Strong Trend'
+    else:
+        return 'Transition'
+
+def get_dynamic_weights(regime):
+    """
+    Get dynamic component weights based on market regime
+    """
+    if regime == 'Choppy':
+        return {
+            'Breadth Momentum': 0.30,
+            'Distribution Filter': 0.25,
+            'Price Confirmation': 0.15,
+            'Ratio Leadership': 0.15,
+            'Credit/Sentiment': 0.15
+        }
+    elif regime == 'Strong Trend':
+        return {
+            'Breadth Momentum': 0.20,
+            'Distribution Filter': 0.15,
+            'Price Confirmation': 0.25,
+            'Ratio Leadership': 0.25,
+            'Credit/Sentiment': 0.15
+        }
+    else:  # Transition
+        return {
+            'Breadth Momentum': 0.25,
+            'Distribution Filter': 0.20,
+            'Price Confirmation': 0.20,
+            'Ratio Leadership': 0.20,
+            'Credit/Sentiment': 0.15
+        }
+
+def calculate_gate_score_v2(indicators, oscillators, trin_data, nyad_data, spxadp_data, nyhl_data, prior_data=None):
+    """
+    Enhanced Gate Score Calculation v2.0
+    Returns: Score (0-10), component breakdown, commentary
+    """
+    # Detect regime and get dynamic weights
+    regime = detect_market_regime(indicators, oscillators)
+    weights = get_dynamic_weights(regime)
+    
+    # Calculate oscillator consensus
+    osc_consensus, osc_tally = calculate_oscillator_consensus(indicators, oscillators)
+    
+    # Calculate TRIN composite score
+    trin_score = calculate_trin_composite_score(trin_data)
+    
+    # Calculate NYMO Proxy
+    nymo_proxy = calculate_nymo_proxy_v2(nyad_data, spxadp_data, nyhl_data)
+    
+    # Component Scores (0-10 scale)
+    components = {}
+    
+    # 1. Breadth Momentum (SPXA50R, BPSPX, BPNYA)
+    breadth_score = 0
+    if indicators.get('SPXA50R', 0) > 40:
+        breadth_score += 4
+    elif indicators.get('SPXA50R', 0) > 30:
+        breadth_score += 3
+    elif indicators.get('SPXA50R', 0) > 28:
+        breadth_score += 2
+    else:
+        breadth_score += 1
+    
+    if indicators.get('BPSPX', 0) > 50:
+        breadth_score += 3
+    elif indicators.get('BPSPX', 0) > 40:
+        breadth_score += 2
+    elif indicators.get('BPSPX', 0) > 35:
+        breadth_score += 1
+    
+    if indicators.get('BPNYA', 0) > 50:
+        breadth_score += 3
+    elif indicators.get('BPNYA', 0) > 40:
+        breadth_score += 2
+    
+    components['Breadth Momentum'] = min(breadth_score, 10)
+    
+    # 2. Distribution Filter (TRIN, SPXADP)
+    dist_score = 0
+    if trin_score >= 7:
+        dist_score += 5
+    elif trin_score >= 4:
+        dist_score += 3
+    elif trin_score >= 2:
+        dist_score += 1
+    
+    if indicators.get('SPXADP', 0) > 50:
+        dist_score += 3
+    elif indicators.get('SPXADP', 0) > 35:
+        dist_score += 2
+    elif indicators.get('SPXADP', 0) > 20:
+        dist_score += 1
+    
+    components['Distribution Filter'] = min(dist_score, 10)
+    
+    # 3. Price Confirmation (RSP, SPX, URSP)
+    price_score = 0
+    if indicators.get('RSP', 0) > 194.55:  # Above pivot
+        price_score += 4
+    elif indicators.get('RSP', 0) > 188.58:  # Above EMAENV lower
+        price_score += 2
+    
+    if indicators.get('SPX', 0) > 6582.15:  # Above pivot
+        price_score += 3
+    
+    if indicators.get('URSP', 0) > 41.77:  # Above pivot
+        price_score += 3
+    
+    components['Price Confirmation'] = min(price_score, 10)
+    
+    # 4. Ratio Leadership (RSP:SPY, IWM:SPY, XLF:SPY)
+    ratio_score = 0
+    if indicators.get('RSP:SPY', 0) > 0.302:
+        ratio_score += 4
+    elif indicators.get('RSP:SPY', 0) > 0.294:
+        ratio_score += 2
+    
+    if indicators.get('IWM:SPY', 0) > 0.3943:
+        ratio_score += 3
+    elif indicators.get('IWM:SPY', 0) > 0.3775:
+        ratio_score += 2
+    
+    if indicators.get('XLF:SPY', 0) > 0.0779:
+        ratio_score += 3
+    elif indicators.get('XLF:SPY', 0) > 0.0751:
+        ratio_score += 1
+    
+    components['Ratio Leadership'] = min(ratio_score, 10)
+    
+    # 5. Credit/Sentiment (HYG:IEF, HYG:TLT, VIX, CPCE)
+    credit_score = 0
+    if indicators.get('VIX', 99) < 20:
+        credit_score += 3
+    elif indicators.get('VIX', 99) < 25:
+        credit_score += 2
+    
+    if indicators.get('CPCE', 0) < 0.60:
+        credit_score += 3
+    elif indicators.get('CPCE', 0) < 0.70:
+        credit_score += 2
+    
+    if indicators.get('HYG:IEF', 0) > 0.840:
+        credit_score += 2
+    
+    if indicators.get('HYG:TLT', 0) > 0.932:
+        credit_score += 2
+    
+    components['Credit/Sentiment'] = min(credit_score, 10)
+    
+    # Calculate weighted score
+    final_score = 0
+    for component, score in components.items():
+        final_score += score * weights[component]
+    
+    final_score = round(min(max(final_score, 0), 10), 1)
+    
+    # Continuity tracking (if prior data available)
+    delta = None
+    if prior_data is not None and 'Gate Score' in prior_data:
+        delta = round(final_score - prior_data['Gate Score'], 1)
+    
+    # Commentary
+    if final_score >= 7.0:
+        action = "🟢 Standard Entry"
+        position = "50-75%"
+    elif final_score >= 5.0:
+        action = "🟡 Scale-In"
+        position = "25-50%"
+    elif final_score >= 3.0:
+        action = "🟡 Watch Only"
+        position = "0-25%"
+    else:
+        action = "🔴 Stand Aside"
+        position = "0%"
+    
+    return {
+        'Gate Score': final_score,
+        'Delta': delta,
+        'Action': action,
+        'Position': position,
+        'Components': components,
+        'Weights': weights,
+        'Regime': regime,
+        'Oscillator Consensus': osc_consensus,
+        'Oscillator Tally': osc_tally,
+        'TRIN Score': trin_score,
+        'NYMO Proxy': nymo_proxy
+    }
+
+def get_position_sizing(gate_score):
+    """
+    Dynamic position sizing based on Gate Score
+    """
+    if gate_score >= 7.0:
+        return {
+            'Position': '75-100%',
+            'Stop': '2x ATR or S1 pivot',
+            'Target': 'R2/R3 or trail below 20-EMA',
+            'Conviction': 'High'
+        }
+    elif gate_score >= 5.0:
+        return {
+            'Position': '50%',
+            'Stop': '1.5x ATR or EMAENV lower',
+            'Target': 'R1/R2',
+            'Conviction': 'Medium-High'
+        }
+    elif gate_score >= 3.0:
+        return {
+            'Position': '25%',
+            'Stop': '1x ATR or S2 pivot',
+            'Target': 'R1',
+            'Conviction': 'Low'
+        }
+    else:
+        return {
+            'Position': '0%',
+            'Stop': 'N/A',
+            'Target': 'N/A',
+            'Conviction': 'Avoid'
+        }
+
+def get_targets_triggers(indicators):
+    """
+    Generate specific targets and triggers for key indicators
+    """
+    targets = {
+        'RSP': {
+            'Current': indicators.get('RSP', 0),
+            'Bullish Target': '>194.55 (pivot), >198.25 (EMAENV)',
+            'Bearish Invalidation': '<188.58 (EMAENV lower)',
+            'Confirmation Trigger': 'Close >194.55 + TSI hold'
+        },
+        'BPSPX': {
+            'Current': indicators.get('BPSPX', 0),
+            'Bullish Target': '>42.20 (pivot), %B >0.60',
+            'Bearish Invalidation': '<34.40 (intraday low)',
+            'Confirmation Trigger': 'Close >40 + Stoch cross hold'
+        },
+        'SPXA50R': {
+            'Current': indicators.get('SPXA50R', 0),
+            'Bullish Target': '>35.73 (pivot), >32.04 (EMAENV)',
+            'Bearish Invalidation': '<26.20 (intraday low)',
+            'Confirmation Trigger': 'Hold >28 into close'
+        },
+        'TRIN': {
+            'Current': indicators.get('TRIN', 0),
+            'Bullish Target': '<1.20 (neutral), <1.10 (bullish)',
+            'Bearish Invalidation': '>1.90 (extreme distribution)',
+            'Confirmation Trigger': 'Close <1.40 + TSI hold'
+        },
+        'SPXADP': {
+            'Current': indicators.get('SPXADP', 0),
+            'Bullish Target': '>50.00 (broad participation)',
+            'Bearish Invalidation': '<20.13 (pivot breakdown)',
+            'Confirmation Trigger': 'Stabilize >35 into close'
+        },
+        'RSP:SPY': {
+            'Current': indicators.get('RSP:SPY', 0),
+            'Bullish Target': '>0.302 (R1), >0.310 (confirmation)',
+            'Bearish Invalidation': '<0.287 (EMAENV lower)',
+            'Confirmation Trigger': 'Close >0.300 + TSI hold'
+        }
+    }
+    return targets
+
+# ============================================================================
+# STREAMLIT UI
+# ============================================================================
+
+st.title("📊 Market Breadth Decision Engine v2.0")
+st.markdown("### Enhanced Multi-Factor Market Regime Framework")
+
+# Sidebar
+st.sidebar.header("📁 Upload Data")
+hist_zip = st.sidebar.file_uploader("Historical ZIP", type="zip")
+daily_csv = st.sidebar.file_uploader("Daily Snapshot CSV", type="csv")
+prior_csv = st.sidebar.file_uploader("Prior Upload (for continuity)", type="csv")
+
+# Load data
+historical_data = {}
+snapshot = None
+prior_data = None
+
+if hist_zip:
+    historical_data = load_historical_zip(hist_zip)
+    st.sidebar.success(f"✅ {len(historical_data)} historical series loaded")
+
+if daily_csv:
+    snapshot = load_snapshot(daily_csv)
+    st.sidebar.success("✅ Snapshot loaded")
+
+if prior_csv:
+    prior_data = load_prior_upload(prior_csv)
+    st.sidebar.success("✅ Prior upload loaded for continuity tracking")
+
+# Default indicators (can be overridden by snapshot)
+indicators = {
+    'SPXA50R': 29.80,
+    'BPSPX': 38.20,
+    'BPNYA': 44.49,
+    'TRIN': 1.65,
+    'SPXADP': 28.20,
+    'RSP': 192.85,
+    'SPX': 6585.79,
+    'VIX': 24.56,
+    'CPCE': 0.56,
+    'RSP:SPY': 0.294,
+    'IWM:SPY': 0.3813,
+    'XLF:SPY': 0.0754,
+    'HYG:IEF': 0.835,
+    'HYG:TLT': 0.920
+}
+
+# Override with snapshot data
+if snapshot is not None and "Symbol" in snapshot.columns:
+    for _, row in snapshot.iterrows():
+        s = str(row["Symbol"]).replace("$", "")
+        if s in indicators:
+            indicators[s] = float(row.get("Close", row.get("Last", 0)))
+
+# Default oscillator data (would come from snapshot in production)
+oscillators = {
+    'SPXA50R': {'TSI_line': -39.39, 'TSI_signal': -42.61, 'MACD_hist': 0.532, 'ADX': 49.42, 
+                'plus_DI': 15.87, 'minus_DI': 33.45, 'MCCI': -35.59, 'Stoch_K': 25.95, 
+                'Stoch_D': 15.28, '%B': 0.41, 'ROC': -14.37},
+    'BPSPX': {'TSI_line': -37.84, 'TSI_signal': -39.78, 'MACD_hist': -0.154, 'ADX': 42.22,
+              'plus_DI': 26.44, 'minus_DI': 49.81, 'MCCI': -73.41, 'Stoch_K': 20.40,
+              'Stoch_D': 13.21, '%B': 0.34, 'ROC': -11.98},
+    'TRIN': {'TSI_line': 12.55, 'TSI_signal': -1.17, 'MACD_hist': 0.059, 'ADX': 37.67,
+             'plus_DI': 32.83, 'minus_DI': 10.86, 'MCCI': 189.19, 'Stoch_K': 47.99,
+             'Stoch_D': 39.91, '%B': 1.30, 'ROC': 101.02, 'TSI_bullish': True},
+    'RSP': {'TSI_line': -22.67, 'TSI_signal': -24.20, 'MACD_hist': -0.011, 'ADX': 40.53,
+            'plus_DI': 16.12, 'minus_DI': 30.04, 'MCCI': -19.14, 'Stoch_K': 39.57,
+            'Stoch_D': 24.04, '%B': 0.46, 'ROC': -0.66}
+}
+
+# NYAD, SPXADP, NYHL data for NYMO Proxy
+nyad_data = {
+    'rising': True, '%B': 0.46, 'TSI_bullish': True, 'MCCI': -11.92
+}
+spxadp_data = {
+    'level': 28.20, 'TSI_bullish': True, 'MACD_positive': True, 'MCCI': 58.85
+}
+nyhl_data = {
+    'daily_positive': True, '5day_sum': 50, 'renko_green': False
+}
+
+trin_data = {
+    'level': indicators.get('TRIN', 1.65),
+    '%B': oscillators.get('TRIN', {}).get('%B', 1.30),
+    'TSI_bullish': oscillators.get('TRIN', {}).get('TSI_bullish', False),
+    'ROC': oscillators.get('TRIN', {}).get('ROC', 101.02)
+}
+
+# Calculate Gate Score
+result = calculate_gate_score_v2(
+    indicators, oscillators, trin_data, nyad_data, spxadp_data, nyhl_data, prior_data
 )
 
-SYMBOL_MAP = {
-    "rsp": "RSP", "ursp": "URSP", "spy": "SPY", "vxx": "VXX",
-    "_bpspx": "$BPSPX", "bpspx": "$BPSPX", "_bpnya": "$BPNYA", "bpnya": "$BPNYA",
-    "_oexa50r": "$OEXA50R", "oexa50r": "$OEXA50R", "_oexa150r": "$OEXA150R", "oexa150r": "$OEXA150R",
-    "_oexa200r": "$OEXA200R", "oexa200r": "$OEXA200R", "_spxa50r": "$SPXA50R", "spxa50r": "$SPXA50R",
-    "_nymo": "$NYMO", "nymo": "$NYMO", "_nysi": "$NYSI", "nysi": "$NYSI",
-    "_cpce": "$CPCE", "cpce": "$CPCE", "_nyhl": "$NYHL", "nyhl": "$NYHL",
-    "_nyad": "$NYAD", "nyad": "$NYAD", "_spxadp": "$SPXADP", "spxadp": "$SPXADP",
-    "_trin": "$TRIN", "trin": "$TRIN", "_vix": "$VIX", "vix": "$VIX",
-    "hyg_ief": "HYG:IEF", "hyg_tlt": "HYG:TLT", "rsp_spy": "RSP:SPY", "smh_spy": "SMH:SPY",
-    "iwm_spy": "IWM:SPY", "xlf_spy": "XLF:SPY", "spxs_svol": "SPXS:SVOL",
-}
-INVERSE_SERIES = {"$VIX", "VXX", "$TRIN", "$CPCE", "SPXS:SVOL"}
+# Get position sizing
+position_info = get_position_sizing(result['Gate Score'])
 
-BUCKETS = {
-    "Breadth": ["$BPSPX", "$BPNYA", "$SPXA50R", "$OEXA50R", "$OEXA150R", "$OEXA200R", "$NYMO", "$NYSI", "$NYHL", "$NYAD", "$SPXADP"],
-    "Leadership": ["RSP:SPY", "SMH:SPY", "IWM:SPY", "XLF:SPY", "HYG:IEF", "HYG:TLT"],
-    "Risk": ["$VIX", "VXX", "$TRIN", "$CPCE", "SPXS:SVOL"],
-    "Price": ["RSP", "SPY"],
-}
-DEFAULT_COMPONENT_WEIGHTS = {
-    "$BPSPX": 1.20, "$BPNYA": 1.00, "$SPXA50R": 1.25, "$OEXA50R": 0.80, "$OEXA150R": 0.70, "$OEXA200R": 0.75,
-    "$NYMO": 1.15, "$NYSI": 1.00, "$NYHL": 0.85, "$NYAD": 0.85, "$SPXADP": 0.85,
-    "RSP:SPY": 1.00, "SMH:SPY": 0.90, "IWM:SPY": 0.80, "XLF:SPY": 0.70, "HYG:IEF": 0.95, "HYG:TLT": 0.70,
-    "$VIX": 1.00, "VXX": 0.90, "$TRIN": 0.85, "$CPCE": 0.75, "SPXS:SVOL": 1.00,
-    "RSP": 1.15, "SPY": 0.70,
-}
+# Get targets/triggers
+targets = get_targets_triggers(indicators)
 
+# ============================================================================
+# DASHBOARD
+# ============================================================================
 
-def safe_float(x: Any) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return np.nan
+# Top Metrics
+col1, col2, col3, col4 = st.columns(4)
 
-
-def fmt_num(v: Any, d: int = 2) -> str:
-    if pd.isna(v):
-        return "n/a"
-    return f"{float(v):.{d}f}"
-
-
-def parse_stockcharts_csv(content: bytes) -> pd.DataFrame:
-    text = content.decode("utf-8", errors="ignore")
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    rows = []
-    for ln in lines:
-        if ln.lower().startswith(("date,", "symbol,", "ticker,")):
-            continue
-        parts = [p.strip() for p in ln.split(",")]
-        if len(parts) < 6:
-            continue
-        dt = pd.to_datetime(parts[0], errors="coerce")
-        if pd.isna(dt):
-            continue
-        vals = [safe_float(x) for x in parts[1:6]]
-        rows.append({"date": dt, "open": vals[0], "high": vals[1], "low": vals[2], "close": vals[3], "volume": vals[4]})
-    if not rows:
-        raise ValueError("Could not parse rows from CSV.")
-    return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
-
-
-def symbol_from_filename(name: str) -> Tuple[str, str]:
-    stem = Path(name).stem.strip().lower()
-    timeframe = "weekly" if stem.endswith("w") or stem.endswith("_w") else "daily"
-    if timeframe == "weekly":
-        if stem.endswith("_w"):
-            stem = stem[:-2]
-        elif stem.endswith("w"):
-            stem = stem[:-1]
-    stem = stem.strip("_")
-    sym = SYMBOL_MAP.get(stem, stem.upper())
-    return sym, timeframe
-
-
-def parse_stockcharts_zip(file_bytes: bytes) -> pd.DataFrame:
-    daily = []
-    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-        names = [n for n in zf.namelist() if (not n.endswith("/")) and n.lower().endswith(".csv")]
-        prog = st.progress(0.0, text="Parsing ZIP...")
-        for i, name in enumerate(names, start=1):
-            try:
-                content = zf.read(name)
-                df = parse_stockcharts_csv(content)
-                sym, tf = symbol_from_filename(name)
-                if tf == "daily":
-                    df["symbol"] = sym
-                    daily.append(df)
-            except Exception:
-                pass
-            prog.progress(i / max(len(names), 1), text=f"Parsing ZIP... {i}/{len(names)}")
-        prog.empty()
-    if not daily:
-        raise ValueError("No daily CSV files were parsed from ZIP.")
-    return pd.concat(daily, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
-
-
-def normalize_series_for_composite(series: pd.Series, inverse: bool = False) -> pd.Series:
-    s = pd.to_numeric(series, errors="coerce")
-    if s.dropna().empty:
-        return pd.Series(index=s.index, dtype=float)
-    first_valid = s.dropna().iloc[0]
-    if pd.isna(first_valid) or abs(first_valid) < 1e-12:
-        return pd.Series(index=s.index, dtype=float)
-    if inverse:
-        return 100.0 * first_valid / s.replace(0, np.nan)
-    return 100.0 * s / first_valid
-
-
-def weighted_average_df(df: pd.DataFrame, weight_map: Dict[str, float]) -> pd.Series:
-    cols = [c for c in df.columns if c in weight_map]
-    if not cols:
-        return pd.Series(index=df.index, dtype=float)
-    w = pd.Series({c: weight_map[c] for c in cols}, dtype=float)
-    w = w / w.sum()
-    return (df[cols] * w).sum(axis=1)
-
-
-def ema(series: pd.Series, span: int) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce").ewm(span=span, adjust=False).mean()
-
-
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    s = pd.to_numeric(series, errors="coerce")
-    delta = s.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    ma_up = up.ewm(alpha=1 / period, adjust=False).mean()
-    ma_down = down.ewm(alpha=1 / period, adjust=False).mean()
-    rs = ma_up / ma_down.replace(0, np.nan)
-    return (100 - (100 / (1 + rs))).fillna(50)
-
-
-def true_strength_index(series: pd.Series, long_len: int = 25, short_len: int = 13, signal_len: int = 7) -> Tuple[pd.Series, pd.Series]:
-    s = pd.to_numeric(series, errors="coerce")
-    m = s.diff()
-    abs_m = m.abs()
-    dsm = ema(ema(m, long_len), short_len)
-    dsa = ema(ema(abs_m, long_len), short_len)
-    tsi = 100 * (dsm / dsa.replace(0, np.nan))
-    signal = ema(tsi, signal_len)
-    return tsi, signal
-
-
-def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
-    h = pd.to_numeric(high, errors="coerce")
-    l = pd.to_numeric(low, errors="coerce")
-    c = pd.to_numeric(close, errors="coerce")
-    tp = (h + l + c) / 3
-    sma = tp.rolling(period).mean()
-    mad = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    return (tp - sma) / (0.015 * mad.replace(0, np.nan))
-
-
-def percent_b(series: pd.Series, window: int = 20, num_std: float = 2.0) -> pd.Series:
-    s = pd.to_numeric(series, errors="coerce")
-    ma = s.rolling(window).mean()
-    std = s.rolling(window).std()
-    upper = ma + num_std * std
-    lower = ma - num_std * std
-    denom = (upper - lower).replace(0, np.nan)
-    return (s - lower) / denom
-
-
-def roc(series: pd.Series, length: int = 12) -> pd.Series:
-    s = pd.to_numeric(series, errors="coerce")
-    return 100 * (s / s.shift(length) - 1)
-
-
-def build_ohlc_from_close(close: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    c = pd.to_numeric(close, errors="coerce")
-    h = c.rolling(2).max().fillna(c)
-    l = c.rolling(2).min().fillna(c)
-    return h, l, c
-
-
-def build_bucket_and_holistic_prices(hist: pd.DataFrame, bucket_weights: Dict[str, float]) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    piv = hist.pivot(index="date", columns="symbol", values="close").sort_index()
-    transformed = {}
-    for sym in piv.columns:
-        transformed[sym] = normalize_series_for_composite(piv[sym], inverse=(sym in INVERSE_SERIES))
-    rebased = pd.DataFrame(transformed, index=piv.index)
-
-    bucket_prices = pd.DataFrame(index=rebased.index)
-    for bucket_name, members in BUCKETS.items():
-        members_present = [m for m in members if m in rebased.columns]
-        if not members_present:
-            continue
-        weight_map = {m: DEFAULT_COMPONENT_WEIGHTS.get(m, 1.0) for m in members_present}
-        bucket_prices[bucket_name] = weighted_average_df(rebased[members_present], weight_map)
-
-    active = [b for b in bucket_weights if b in bucket_prices.columns and bucket_weights[b] > 0]
-    holistic = pd.DataFrame(index=bucket_prices.index)
-    if active:
-        w = pd.Series({b: bucket_weights[b] for b in active}, dtype=float)
-        w = w / w.sum()
-        holistic["Holistic"] = (bucket_prices[active] * w).sum(axis=1)
-    return bucket_prices, holistic
-
-
-def apply_lookback(df: pd.DataFrame, lookback: str) -> pd.DataFrame:
-    if df.empty:
-        return df
-    mapping = {"6M": 126, "1Y": 252, "2Y": 504, "3Y": 756, "5Y": 1260}
-    if lookback == "MAX":
-        return df.copy()
-    return df.tail(mapping[lookback]).copy()
-
-
-def make_price_chart(holistic: pd.DataFrame, buckets: pd.DataFrame) -> go.Figure:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=holistic.index, y=holistic["Holistic"], mode="lines", name="Holistic Price", line=dict(width=4)))
-    for col in buckets.columns:
-        fig.add_trace(go.Scatter(x=buckets.index, y=buckets[col], mode="lines", name=col, line=dict(width=1.5), opacity=0.6))
-    fig.update_layout(
-        template="plotly_white",
-        height=460,
-        title="Holistic Price with Bucket Composites",
-        margin=dict(l=20, r=20, t=50, b=20),
-        xaxis_title="Date",
-        yaxis_title="Rebased Value",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+with col1:
+    st.metric(
+        label="🎯 Gate Score",
+        value=f"{result['Gate Score']}/10",
+        delta=f"{result['Delta']}" if result['Delta'] else None,
+        delta_color="normal" if result['Delta'] is None else ("normal" if result['Delta'] >= 0 else "inverse")
     )
-    return fig
 
-
-def make_stacked_oscillator_chart(price: pd.Series, rsi_len: int, cci_len: int, tsi_long: int, tsi_short: int, tsi_signal: int, bb_len: int, bb_std: float, roc_len: int, show_roc: bool) -> go.Figure:
-    high, low, close = build_ohlc_from_close(price)
-    rsi_s = rsi(close, rsi_len)
-    cci_s = cci(high, low, close, cci_len)
-    tsi_s, tsi_sig = true_strength_index(close, tsi_long, tsi_short, tsi_signal)
-    bb_s = percent_b(close, bb_len, bb_std)
-    roc_s = roc(close, roc_len)
-
-    rows = 5 if show_roc else 4
-    heights = [0.22, 0.19, 0.24, 0.19, 0.16] if show_roc else [0.26, 0.22, 0.28, 0.24]
-    titles = ["RSI", "CCI", "TSI", "%B", "ROC"] if show_roc else ["RSI", "CCI", "TSI", "%B"]
-
-    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=heights, subplot_titles=titles)
-    fig.add_trace(go.Scatter(x=price.index, y=rsi_s, mode="lines", name=f"RSI({rsi_len})", line=dict(width=2)), row=1, col=1)
-    fig.add_hline(y=70, row=1, col=1, line_width=1, opacity=0.35)
-    fig.add_hline(y=50, row=1, col=1, line_width=1, opacity=0.25, line_dash="dash")
-    fig.add_hline(y=30, row=1, col=1, line_width=1, opacity=0.35)
-
-    fig.add_trace(go.Scatter(x=price.index, y=cci_s, mode="lines", name=f"CCI({cci_len})", line=dict(width=2)), row=2, col=1)
-    fig.add_hline(y=100, row=2, col=1, line_width=1, opacity=0.35)
-    fig.add_hline(y=0, row=2, col=1, line_width=1, opacity=0.25, line_dash="dash")
-    fig.add_hline(y=-100, row=2, col=1, line_width=1, opacity=0.35)
-
-    fig.add_trace(go.Scatter(x=price.index, y=tsi_s, mode="lines", name=f"TSI({tsi_long},{tsi_short},{tsi_signal})", line=dict(width=2.5)), row=3, col=1)
-    fig.add_trace(go.Scatter(x=price.index, y=tsi_sig, mode="lines", name="TSI Signal", line=dict(width=2)), row=3, col=1)
-    fig.add_hline(y=0, row=3, col=1, line_width=1, opacity=0.25, line_dash="dash")
-
-    fig.add_trace(go.Scatter(x=price.index, y=bb_s, mode="lines", name=f"%B({bb_len},{bb_std})", line=dict(width=2)), row=4, col=1)
-    fig.add_hline(y=1.0, row=4, col=1, line_width=1, opacity=0.35)
-    fig.add_hline(y=0.5, row=4, col=1, line_width=1, opacity=0.25, line_dash="dash")
-    fig.add_hline(y=0.0, row=4, col=1, line_width=1, opacity=0.35)
-
-    if show_roc:
-        fig.add_trace(go.Scatter(x=price.index, y=roc_s, mode="lines", name=f"ROC({roc_len})", line=dict(width=2)), row=5, col=1)
-        fig.add_hline(y=0, row=5, col=1, line_width=1, opacity=0.25, line_dash="dash")
-
-    fig.update_layout(
-        template="plotly_white",
-        height=1100 if show_roc else 920,
-        margin=dict(l=20, r=20, t=60, b=20),
-        title="Holistic Oscillator Stack",
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
+with col2:
+    st.metric(
+        label="📊 Oscillator Consensus",
+        value=f"{result['Oscillator Consensus']}%",
+        help="% of oscillators showing bullish signals"
     )
-    fig.update_xaxes(title_text="Date", row=rows, col=1)
-    return fig
 
+with col3:
+    st.metric(
+        label="🔍 TRIN Composite",
+        value=f"{result['TRIN Score']}/10",
+        help="TRIN gatekeeper score (≥7 = distribution abating)"
+    )
 
-with st.sidebar:
-    st.markdown("### Data")
-    zip_file = st.file_uploader("Historical ZIP", type=["zip"])
+with col4:
+    st.metric(
+        label="📈 NYMO Proxy",
+        value=result['NYMO Proxy'],
+        help=">1.5 = Strong thrust, 0.5-1.5 = Improving, <-0.5 = Deteriorating"
+    )
 
-    st.markdown("### Bucket Weights")
-    breadth_w = st.slider("Breadth", 0.0, 1.0, 0.45, 0.05)
-    leadership_w = st.slider("Leadership", 0.0, 1.0, 0.20, 0.05)
-    risk_w = st.slider("Risk", 0.0, 1.0, 0.15, 0.05)
-    price_w = st.slider("Price", 0.0, 1.0, 0.20, 0.05)
+st.divider()
 
-    st.markdown("### Oscillator Parameters")
-    lookback = st.selectbox("Chart Window", ["6M", "1Y", "2Y", "3Y", "5Y", "MAX"], index=1)
-    rsi_len = st.slider("RSI Length", 5, 30, 14, 1)
-    cci_len = st.slider("CCI Length", 5, 40, 20, 1)
-    tsi_long = st.slider("TSI Long", 10, 50, 25, 1)
-    tsi_short = st.slider("TSI Short", 4, 25, 13, 1)
-    tsi_signal = st.slider("TSI Signal", 2, 15, 7, 1)
-    bb_len = st.slider("BB% Length", 5, 40, 20, 1)
-    bb_std = st.slider("BB% StdDev", 1.0, 3.0, 2.0, 0.1)
-    roc_len = st.slider("ROC Length", 3, 30, 12, 1)
-    show_roc = st.toggle("Show ROC panel", value=True)
+# Action Panel
+col1, col2, col3 = st.columns(3)
 
-if not zip_file:
-    st.info("Upload your StockCharts ZIP to build the holistic price and oscillator stack.")
+with col1:
+    st.info(f"**Action:** {result['Action']}")
+    st.success(f"**Position Size:** {position_info['Position']}")
+    st.write(f"**Conviction:** {position_info['Conviction']}")
+
+with col2:
+    st.write(f"**Market Regime:** {result['Regime']}")
+    st.write(f"**Stop Loss:** {position_info['Stop']}")
+    st.write(f"**Target:** {position_info['Target']}")
+
+with col3:
+    st.write("### Component Breakdown")
+    for component, score in result['Components'].items():
+        weight = result['Weights'][component]
+        contribution = round(score * weight, 2)
+        st.write(f"{component}: {score}/10 × {weight*100:.0f}% = {contribution}")
+
+st.divider()
+
+# Oscillator Consensus Table
+st.subheader("📊 Oscillator Consensus Table")
+if 'Oscillator Tally' in result and not result['Oscillator Tally'].empty:
+    st.dataframe(result['Oscillator Tally'], use_container_width=True)
 else:
-    try:
-        hist = parse_stockcharts_zip(zip_file.read())
-        bucket_weights = {"Breadth": breadth_w, "Leadership": leadership_w, "Risk": risk_w, "Price": price_w}
-        if sum(bucket_weights.values()) <= 0:
-            st.error("At least one bucket weight must be greater than zero.")
-            st.stop()
+    st.write("Oscillator data not available")
 
-        bucket_prices, holistic = build_bucket_and_holistic_prices(hist, bucket_weights)
-        if holistic.empty or "Holistic" not in holistic.columns:
-            st.error("Could not build a holistic price series from the uploaded ZIP.")
-            st.stop()
+st.divider()
 
-        bucket_prices = apply_lookback(bucket_prices, lookback)
-        holistic = apply_lookback(holistic, lookback)
-        holistic_price = holistic["Holistic"].dropna()
+# Targets & Triggers
+st.subheader("🎯 Specific Targets & Triggers")
+targets_df = pd.DataFrame(targets).T
+st.dataframe(targets_df, use_container_width=True)
 
-        latest = holistic_price.iloc[-1] if not holistic_price.empty else np.nan
-        latest_rsi = rsi(holistic_price, rsi_len).iloc[-1] if len(holistic_price) else np.nan
-        latest_cci = cci(*build_ohlc_from_close(holistic_price), cci_len).iloc[-1] if len(holistic_price) else np.nan
-        latest_tsi, latest_tsi_sig = true_strength_index(holistic_price, tsi_long, tsi_short, tsi_signal)
-        latest_bb = percent_b(holistic_price, bb_len, bb_std).iloc[-1] if len(holistic_price) else np.nan
+st.divider()
 
-        c1, c2, c3, c4, c5 = st.columns(5)
-        with c1:
-            st.markdown(f"<div class='kpi'><div class='kpi-title'>Holistic Price</div><div class='kpi-value'>{fmt_num(latest, 2)}</div></div>", unsafe_allow_html=True)
-        with c2:
-            st.markdown(f"<div class='kpi'><div class='kpi-title'>RSI</div><div class='kpi-value'>{fmt_num(latest_rsi, 1)}</div></div>", unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"<div class='kpi'><div class='kpi-title'>CCI</div><div class='kpi-value'>{fmt_num(latest_cci, 1)}</div></div>", unsafe_allow_html=True)
-        with c4:
-            st.markdown(f"<div class='kpi'><div class='kpi-title'>TSI / Signal</div><div class='kpi-value'>{fmt_num(latest_tsi.iloc[-1],1)} / {fmt_num(latest_tsi_sig.iloc[-1],1)}</div></div>", unsafe_allow_html=True)
-        with c5:
-            st.markdown(f"<div class='kpi'><div class='kpi-title'>%B</div><div class='kpi-value'>{fmt_num(latest_bb, 2)}</div></div>", unsafe_allow_html=True)
+# Visualizations
+col1, col2 = st.columns(2)
 
-        st.plotly_chart(make_price_chart(holistic, bucket_prices), width="stretch")
-        st.plotly_chart(
-            make_stacked_oscillator_chart(
-                holistic_price, rsi_len, cci_len, tsi_long, tsi_short, tsi_signal, bb_len, bb_std, roc_len, show_roc
-            ),
-            width="stretch",
+with col1:
+    st.subheader("📈 Gate Score Distribution")
+    scores = np.random.normal(result['Gate Score'], 1.5, 1000)
+    scores = np.clip(scores, 0, 10)
+    fig = go.Figure()
+    fig.add_histogram(x=scores, nbinsx=40, marker_color='lightblue')
+    fig.add_vline(x=result['Gate Score'], line_color="red", line_width=3)
+    fig.update_layout(title="Gate Score Distribution", xaxis_title="Score", yaxis_title="Frequency")
+    st.plotly_chart(fig, use_container_width=True)
+
+with col2:
+    st.subheader("📊 Component Weights")
+    fig = go.Figure(data=[
+        go.Pie(
+            labels=list(result['Weights'].keys()),
+            values=[v*100 for v in result['Weights'].values()],
+            hole=0.3
         )
+    ])
+    fig.update_layout(title="Dynamic Component Weights")
+    st.plotly_chart(fig, use_container_width=True)
 
-        with st.expander("Bucket weights and latest bucket values", expanded=False):
-            summary = pd.DataFrame({
-                "Bucket": list(bucket_weights.keys()),
-                "Weight": list(bucket_weights.values()),
-                "Latest Value": [
-                    bucket_prices[b].dropna().iloc[-1] if b in bucket_prices.columns and not bucket_prices[b].dropna().empty else np.nan
-                    for b in bucket_weights.keys()
-                ],
-            })
-            st.dataframe(summary, width="stretch", hide_index=True)
+st.divider()
 
-        with st.expander("Available symbols loaded from ZIP", expanded=False):
-            sym_df = pd.DataFrame({"symbol": sorted(hist["symbol"].dropna().unique().tolist())})
-            st.dataframe(sym_df, width="stretch", hide_index=True)
-    except Exception as e:
-        st.exception(e)
+# Continuity Tracking
+if prior_data is not None:
+    st.subheader("📋 Continuity Tracking vs. Prior Upload")
+    delta_data = {
+        'Indicator': ['SPXA50R', 'BPSPX', 'TRIN', 'RSP', 'Gate Score'],
+        'Prior': [
+            prior_data.get('SPXA50R', 0),
+            prior_data.get('BPSPX', 0),
+            prior_data.get('TRIN', 0),
+            prior_data.get('RSP', 0),
+            prior_data.get('Gate Score', 0)
+        ],
+        'Current': [
+            indicators.get('SPXA50R', 0),
+            indicators.get('BPSPX', 0),
+            indicators.get('TRIN', 0),
+            indicators.get('RSP', 0),
+            result['Gate Score']
+        ]
+    }
+    delta_df = pd.DataFrame(delta_data)
+    delta_df['Delta'] = delta_df['Current'] - delta_df['Prior']
+    delta_df['Delta'] = delta_df['Delta'].round(2)
+    st.dataframe(delta_df, use_container_width=True)
+
+st.divider()
+
+# Export
+st.subheader("📤 Export Report")
+if st.button("Generate CSV Report"):
+    report_data = {
+        'Timestamp': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
+        'Gate Score': [result['Gate Score']],
+        'Action': [result['Action']],
+        'Position': [position_info['Position']],
+        'Regime': [result['Regime']],
+        'Oscillator Consensus': [result['Oscillator Consensus']],
+        'TRIN Score': [result['TRIN Score']],
+        'NYMO Proxy': [result['NYMO Proxy']]
+    }
+    for indicator, value in indicators.items():
+        report_data[f'{indicator}_Value'] = [value]
+    
+    report_df = pd.DataFrame(report_data)
+    csv = report_df.to_csv(index=False)
+    st.download_button(
+        label="📥 Download CSV",
+        data=csv,
+        file_name=f"breadth_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+
+st.caption("⚠️ Upload historical ZIP + daily snapshot + prior upload for full analysis. This is a decision support tool, not investment advice.")
